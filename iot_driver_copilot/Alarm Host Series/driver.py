@@ -1,126 +1,131 @@
 import os
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from flask import Flask, request, jsonify, Response
+from functools import wraps
 
-# Environment variables for configuration
-DEVICE_IP = os.environ.get("DEVICE_IP", "192.168.1.64")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "8000"))
-DEVICE_USER = os.environ.get("DEVICE_USER", "admin")
-DEVICE_PASS = os.environ.get("DEVICE_PASS", "12345")
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+# --- Device SDK Communication Layer (Simulated/Stub for this driver) ---
+# In real deployment, this would use the Hikvision HCNetSDK Python bindings or a proper SDK wrapper.
+# Here, we simulate device communication for demonstration.
 
-# Simulated device backend communication (replace with SDK/protocol logic as needed)
-def simulate_device_status():
-    return {
-        "alarm_state": "normal",
-        "zones": [
-            {"id": 1, "status": "armed", "tamper": False},
-            {"id": 2, "status": "bypassed", "tamper": True},
-        ],
-        "sensors": {
+class HikvisionAlarmHost:
+    def __init__(self, ip, port, username, password):
+        self.device_ip = ip
+        self.device_port = port
+        self.username = username
+        self.password = password
+        # Simulate device connection/session
+        self.session = True
+
+    def get_status(self):
+        # Simulate device status response
+        return {
+            "alarm_state": "normal",
+            "zones": [
+                {"id": 1, "status": "armed"},
+                {"id": 2, "status": "bypassed"},
+                {"id": 3, "status": "alarm"}
+            ],
             "battery_voltage": 12.7,
-            "water": 0,
-            "dust": 13,
-            "noise": 41,
-            "environmental": {"temperature": 26.2, "humidity": 44.1},
-        },
-        "subsystems": [
-            {"id": "A", "status": "armed"},
-            {"id": "B", "status": "disarmed"},
-        ],
-    }
+            "sensors": {
+                "water": "dry",
+                "dust": "normal",
+                "noise": 32.4,
+                "environmental": {"temp": 23.1, "humidity": 45.2}
+            }
+        }
 
-def simulate_clear_alarm():
-    return {"result": "success", "message": "Alarms cleared."}
+    def clear_alarm(self):
+        # Simulate clearing alarms
+        return {"result": "success", "message": "Alarms cleared"}
 
-def simulate_subsys_operation(subsystem_id, action):
-    return {
-        "result": "success",
-        "subsystem_id": subsystem_id,
-        "action": action,
-        "message": f"Subsystem {subsystem_id} {action} operation performed."
-    }
+    def manage_subsystem(self, subsystem_id, action):
+        # Simulate arm/disarm/clear alarm for subsystems
+        allowed_actions = ["arm", "disarm", "clear"]
+        if action not in allowed_actions:
+            return {"result": "error", "message": "Invalid action"}
+        return {"result": "success", "subsystem_id": subsystem_id, "action": action}
 
-def simulate_zone_bypass(zone_id, bypass):
-    return {
-        "result": "success",
-        "zone_id": zone_id,
-        "bypass": bypass,
-        "message": f"Zone {zone_id} bypass set to {bypass}."
-    }
+    def bypass_zone(self, zone_id, bypass=True):
+        return {
+            "result": "success",
+            "zone_id": zone_id,
+            "bypassed": bypass
+        }
 
-class AlarmHostHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status=200, content_type="application/json"):
-        self.send_response(status)
-        self.send_header('Content-type', content_type)
-        self.end_headers()
+# --- Flask App Initialization ---
 
-    def do_GET(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == "/status":
-            status_data = simulate_device_status()
-            self._set_headers()
-            self.wfile.write(json.dumps(status_data).encode('utf-8'))
-        else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+def get_env_var(key, default=None, required=False):
+    val = os.environ.get(key, default)
+    if required and val is None:
+        raise RuntimeError(f"Environment variable {key} is required.")
+    return val
 
-    def do_POST(self):
-        parsed_path = urlparse(self.path)
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length).decode('utf-8')
-        try:
-            if post_data:
-                data = json.loads(post_data)
-            else:
-                data = {}
-        except Exception:
-            data = {}
+app = Flask(__name__)
 
-        # /subsys endpoint
-        if parsed_path.path == "/subsys":
-            subsystem_id = data.get("subsystem_id")
-            action = data.get("action")
-            if not subsystem_id or not action:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "subsystem_id and action are required."}).encode('utf-8'))
-                return
-            response = simulate_subsys_operation(subsystem_id, action)
-            self._set_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
+# --- Environment Configuration ---
 
-        # /alarm/clear endpoint
-        elif parsed_path.path == "/alarm/clear":
-            response = simulate_clear_alarm()
-            self._set_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
+DEVICE_IP = get_env_var("DEVICE_IP", required=True)
+DEVICE_PORT = int(get_env_var("DEVICE_PORT", 8000))
+DEVICE_USERNAME = get_env_var("DEVICE_USERNAME", "admin")
+DEVICE_PASSWORD = get_env_var("DEVICE_PASSWORD", "12345")
 
-        # /zone/bypass endpoint
-        elif parsed_path.path == "/zone/bypass":
-            zone_id = data.get("zone_id")
-            bypass = data.get("bypass")
-            if zone_id is None or bypass is None:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "zone_id and bypass are required."}).encode('utf-8'))
-                return
-            response = simulate_zone_bypass(zone_id, bypass)
-            self._set_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
+SERVER_HOST = get_env_var("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(get_env_var("SERVER_PORT", 8080))
 
-        else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+# --- Device Session Instance ---
+device = HikvisionAlarmHost(DEVICE_IP, DEVICE_PORT, DEVICE_USERNAME, DEVICE_PASSWORD)
 
-    def log_message(self, format, *args):
-        return  # Silence default logging
+# --- API Helpers ---
 
-def run():
-    server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = HTTPServer(server_address, AlarmHostHTTPRequestHandler)
-    print(f"Alarm Host HTTP Driver running at http://{SERVER_HOST}:{SERVER_PORT}/")
-    httpd.serve_forever()
+def json_content_type(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        resp = f(*args, **kwargs)
+        if isinstance(resp, Response):
+            return resp
+        return Response(
+            json.dumps(resp, ensure_ascii=False),
+            mimetype='application/json'
+        )
+    return decorated
+
+# --- API Endpoints ---
+
+@app.route("/status", methods=["GET"])
+@json_content_type
+def get_status():
+    status = device.get_status()
+    return status
+
+@app.route("/alarm/clear", methods=["POST"])
+@json_content_type
+def clear_alarm():
+    result = device.clear_alarm()
+    return result
+
+@app.route("/subsys", methods=["POST"])
+@json_content_type
+def manage_subsystem():
+    data = request.get_json(force=True)
+    subsystem_id = data.get("subsystem_id")
+    action = data.get("action")
+    if subsystem_id is None or action is None:
+        return {"result": "error", "message": "Missing subsystem_id or action"}, 400
+    result = device.manage_subsystem(subsystem_id, action)
+    return result
+
+@app.route("/zone/bypass", methods=["POST"])
+@json_content_type
+def bypass_zone():
+    data = request.get_json(force=True)
+    zone_id = data.get("zone_id")
+    bypass = data.get("bypass", True)
+    if zone_id is None:
+        return {"result": "error", "message": "Missing zone_id"}, 400
+    result = device.bypass_zone(zone_id, bypass)
+    return result
+
+# --- Main Entrypoint ---
 
 if __name__ == "__main__":
-    run()
+    app.run(host=SERVER_HOST, port=SERVER_PORT)
