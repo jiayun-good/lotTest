@@ -1,106 +1,126 @@
 import os
 import json
-from flask import Flask, request, jsonify
-from threading import Lock
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
-app = Flask(__name__)
-
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+# Environment variables for configuration
+DEVICE_IP = os.environ.get("DEVICE_IP", "192.168.1.64")
 DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "8000"))
+DEVICE_USER = os.environ.get("DEVICE_USER", "admin")
+DEVICE_PASS = os.environ.get("DEVICE_PASS", "12345")
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "5000"))
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
-# Simulated shared state (normally would be maintained by device responses)
-device_state = {
-    "subsystems": {
-        "1": {"status": "disarmed"},
-        "2": {"status": "armed"}
-    },
-    "alarms": [],
-    "zones": {
-        "1": {"bypassed": False},
-        "2": {"bypassed": False},
-        "3": {"bypassed": False}
-    },
-    "sensors": {
-        "water": 0,
-        "dust": 0,
-        "noise": 0,
-        "environmental": {}
-    },
-    "battery_voltage": 12.6
-}
-state_lock = Lock()
+# Simulated device backend communication (replace with SDK/protocol logic as needed)
+def simulate_device_status():
+    return {
+        "alarm_state": "normal",
+        "zones": [
+            {"id": 1, "status": "armed", "tamper": False},
+            {"id": 2, "status": "bypassed", "tamper": True},
+        ],
+        "sensors": {
+            "battery_voltage": 12.7,
+            "water": 0,
+            "dust": 13,
+            "noise": 41,
+            "environmental": {"temperature": 26.2, "humidity": 44.1},
+        },
+        "subsystems": [
+            {"id": "A", "status": "armed"},
+            {"id": "B", "status": "disarmed"},
+        ],
+    }
 
-@app.route("/subsys", methods=["POST"])
-def manage_subsystem():
-    data = request.get_json(force=True)
-    subsystem_id = data.get("subsystem_id")
-    action = data.get("action")
-    if not subsystem_id or not action:
-        return jsonify({"error": "subsystem_id and action are required"}), 400
+def simulate_clear_alarm():
+    return {"result": "success", "message": "Alarms cleared."}
 
-    with state_lock:
-        if subsystem_id not in device_state["subsystems"]:
-            return jsonify({"error": "Invalid subsystem_id"}), 404
+def simulate_subsys_operation(subsystem_id, action):
+    return {
+        "result": "success",
+        "subsystem_id": subsystem_id,
+        "action": action,
+        "message": f"Subsystem {subsystem_id} {action} operation performed."
+    }
 
-        if action not in ("arm", "disarm", "clear_alarm"):
-            return jsonify({"error": "Action must be one of: arm, disarm, clear_alarm"}), 400
+def simulate_zone_bypass(zone_id, bypass):
+    return {
+        "result": "success",
+        "zone_id": zone_id,
+        "bypass": bypass,
+        "message": f"Zone {zone_id} bypass set to {bypass}."
+    }
 
-        if action == "arm":
-            device_state["subsystems"][subsystem_id]["status"] = "armed"
-        elif action == "disarm":
-            device_state["subsystems"][subsystem_id]["status"] = "disarmed"
-        elif action == "clear_alarm":
-            before = len(device_state["alarms"])
-            device_state["alarms"] = [a for a in device_state["alarms"] if a.get("subsystem_id") != subsystem_id]
-            after = len(device_state["alarms"])
-            device_state["subsystems"][subsystem_id]["status"] = "disarmed"
+class AlarmHostHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type="application/json"):
+        self.send_response(status)
+        self.send_header('Content-type', content_type)
+        self.end_headers()
 
-    return jsonify({"result": "ok", "subsystem_id": subsystem_id, "action": action})
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/status":
+            status_data = simulate_device_status()
+            self._set_headers()
+            self.wfile.write(json.dumps(status_data).encode('utf-8'))
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
 
-@app.route("/alarm/clear", methods=["POST"])
-def clear_alarms():
-    with state_lock:
-        cleared = len(device_state["alarms"])
-        device_state["alarms"].clear()
-        for s in device_state["subsystems"].values():
-            s["status"] = "disarmed"
-    return jsonify({"result": "ok", "cleared": cleared})
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length).decode('utf-8')
+        try:
+            if post_data:
+                data = json.loads(post_data)
+            else:
+                data = {}
+        except Exception:
+            data = {}
 
-@app.route("/status", methods=["GET"])
-def get_status():
-    with state_lock:
-        status = {
-            "alarm_state": "active" if device_state["alarms"] else "clear",
-            "alarms": list(device_state["alarms"]),
-            "subsystems": device_state["subsystems"],
-            "zones": device_state["zones"],
-            "sensors": device_state["sensors"],
-            "battery_voltage": device_state["battery_voltage"]
-        }
-    return jsonify(status)
+        # /subsys endpoint
+        if parsed_path.path == "/subsys":
+            subsystem_id = data.get("subsystem_id")
+            action = data.get("action")
+            if not subsystem_id or not action:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "subsystem_id and action are required."}).encode('utf-8'))
+                return
+            response = simulate_subsys_operation(subsystem_id, action)
+            self._set_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
 
-@app.route("/zone/bypass", methods=["POST"])
-def zone_bypass():
-    data = request.get_json(force=True)
-    zone_id = data.get("zone_id")
-    action = data.get("action")
-    if not zone_id or not action:
-        return jsonify({"error": "zone_id and action are required"}), 400
+        # /alarm/clear endpoint
+        elif parsed_path.path == "/alarm/clear":
+            response = simulate_clear_alarm()
+            self._set_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
 
-    with state_lock:
-        if zone_id not in device_state["zones"]:
-            return jsonify({"error": "Invalid zone_id"}), 404
-        if action not in ("bypass", "reinstate"):
-            return jsonify({"error": "Action must be one of: bypass, reinstate"}), 400
+        # /zone/bypass endpoint
+        elif parsed_path.path == "/zone/bypass":
+            zone_id = data.get("zone_id")
+            bypass = data.get("bypass")
+            if zone_id is None or bypass is None:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "zone_id and bypass are required."}).encode('utf-8'))
+                return
+            response = simulate_zone_bypass(zone_id, bypass)
+            self._set_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
 
-        if action == "bypass":
-            device_state["zones"][zone_id]["bypassed"] = True
-        elif action == "reinstate":
-            device_state["zones"][zone_id]["bypassed"] = False
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
 
-    return jsonify({"result": "ok", "zone_id": zone_id, "bypassed": device_state["zones"][zone_id]["bypassed"]})
+    def log_message(self, format, *args):
+        return  # Silence default logging
+
+def run():
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, AlarmHostHTTPRequestHandler)
+    print(f"Alarm Host HTTP Driver running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+    run()
