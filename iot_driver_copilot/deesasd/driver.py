@@ -1,70 +1,104 @@
 import os
-from flask import Flask, request, Response, jsonify, stream_with_context
-import threading
-import queue
-import time
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+import socket
 
-# Mock device protocol API for demonstration (replace with actual protocol handler)
-class DeesasdDevice:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
-        self.running = True
+# Device driver for device "deesasd", model "das" (manufacturer: sad)
+# Environment Variables:
+#   DEVICE_IP: IP address of the device
+#   DEVICE_PORT: Port for device (asd protocol)
+#   SERVER_HOST: Host address for this HTTP server (default: 0.0.0.0)
+#   SERVER_PORT: Port for this HTTP server (default: 8080)
 
-    def get_data_points(self):
-        # Simulate fetching data from device
-        return {
-            "temperature": 23.5,
-            "humidity": 60,
-            "device_status": "OK"
-        }
+DEVICE_IP = os.environ.get('DEVICE_IP')
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-    def process_command(self, cmd_payload):
-        # Simulate device command processing
-        if not isinstance(cmd_payload, dict):
-            return {"success": False, "error": "Payload must be a dict"}
-        # Process the command here
-        return {"success": True, "result": cmd_payload}
+if not DEVICE_IP:
+    raise EnvironmentError("DEVICE_IP environment variable is required.")
 
-    def stream_data(self):
-        # Simulate a continuous stream of device data
-        while self.running:
-            yield f"data: {self.get_data_points()}\n\n"
-            time.sleep(1)
+# Simulated "asd" protocol: for demo, we assume device returns ASCII JSON lines on TCP
 
-# Environment variable configuration
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+def get_device_data():
+    # Connects to the device and reads one data point (JSON string)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(5)
+        s.connect((DEVICE_IP, DEVICE_PORT))
+        s.sendall(b'GET_DATA\n')
+        raw = b''
+        while not raw.endswith(b'\n'):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            raw += chunk
+        try:
+            return json.loads(raw.decode())
+        except Exception:
+            return {"error": "Invalid data from device", "raw": raw.decode(errors='replace')}
 
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+def send_device_command(cmd_payload):
+    # Sends a command to the device and returns response
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(5)
+        s.connect((DEVICE_IP, DEVICE_PORT))
+        msg = 'CMD ' + json.dumps(cmd_payload) + '\n'
+        s.sendall(msg.encode())
+        raw = b''
+        while not raw.endswith(b'\n'):
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            raw += chunk
+        try:
+            return json.loads(raw.decode())
+        except Exception:
+            return {"error": "Invalid response from device", "raw": raw.decode(errors='replace')}
 
-app = Flask(__name__)
-device = DeesasdDevice(DEVICE_IP, DEVICE_PORT)
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type="application/json"):
+        self.send_response(status)
+        self.send_header('Content-type', content_type)
+        self.end_headers()
 
-stream_clients = []
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/data":
+            data = get_device_data()
+            self._set_headers()
+            self.wfile.write(json.dumps(data).encode())
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode())
 
-@app.route("/data", methods=["GET"])
-def get_data():
-    accept = request.headers.get("Accept", "")
-    if "text/event-stream" in accept:
-        def event_stream():
-            for line in device.stream_data():
-                yield line
-        return Response(stream_with_context(event_stream()), mimetype="text/event-stream")
-    else:
-        # Return a snapshot of device data in JSON
-        data = device.get_data_points()
-        return jsonify(data), 200
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/cmd":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                payload = json.loads(post_data)
+            except Exception:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+                return
+            resp = send_device_command(payload)
+            self._set_headers()
+            self.wfile.write(json.dumps(resp).encode())
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode())
 
-@app.route("/cmd", methods=["POST"])
-def send_command():
-    try:
-        payload = request.get_json(force=True)
-    except Exception:
-        return jsonify({"success": False, "error": "Invalid JSON payload"}), 400
-    result = device.process_command(payload)
-    return jsonify(result), 200 if result.get("success") else 400
+    def log_message(self, format, *args):
+        # Suppress default HTTP server logging
+        return
+
+def run(server_class=HTTPServer, handler_class=DeviceHTTPRequestHandler):
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = server_class(server_address, handler_class)
+    print(f"Device driver HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT)
+    run()
