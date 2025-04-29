@@ -1,113 +1,125 @@
 import os
+import threading
+import socketserver
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
-import threading
+from urllib.parse import urlparse, parse_qs
 
-# Environment Variables
+# Environment Variables for configuration
 DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))  # Port for ADAS protocol
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
 SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8000'))
+SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-# Simulated ADAS protocol communication with XML data
-def adas_request(path, command=None):
-    """
-    Simulates communication with a device using the ADAS protocol.
-    In a production driver, this would use sockets or a protocol-specific library.
-    """
-    # For demonstration, we return static XML. Replace with actual protocol communication.
-    if path == '/info':
-        data = f"""
-        <DeviceInfo>
-            <DeviceName>tes</DeviceName>
-            <DeviceModel>sdssd</DeviceModel>
-            <Manufacturer>ss</Manufacturer>
-            <DeviceType>sd</DeviceType>
-            <PrimaryProtocol>adas</PrimaryProtocol>
-        </DeviceInfo>
-        """
-        return data.strip()
-    elif path == '/data':
-        data = """
-        <DataPoints>
-            <Point name="saddsa" value="42"/>
-        </DataPoints>
-        """
-        return data.strip()
-    elif path == '/cmd' and command:
-        data = f"""
-        <CommandResponse>
-            <Command>{command}</Command>
-            <Status>OK</Status>
-        </CommandResponse>
-        """
-        return data.strip()
-    else:
-        return "<Error>Unknown Request</Error>"
+# Dummy device info for demonstration
+DEVICE_INFO = {
+    "device_name": "tes",
+    "device_model": "sdssd",
+    "manufacturer": "ss",
+    "device_type": "sd",
+    "primary_protocol": "adas",
+    "data_format": "XML"
+}
 
-def xml_to_dict(elem):
-    """Recursively converts an XML element to a dictionary."""
-    d = {}
-    for child in elem:
-        if len(child):
-            d[child.tag] = xml_to_dict(child)
-        else:
-            d[child.tag] = child.text
-    return d
+# Simulate device communication via TCP socket (ADAS protocol placeholder)
+def adas_send_command(command):
+    try:
+        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as s:
+            s.settimeout(5)
+            s.connect((DEVICE_IP, DEVICE_PORT))
+            s.sendall(command.encode('utf-8'))
+            data = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            return data.decode('utf-8')
+    except Exception as e:
+        return f"<error>{str(e)}</error>"
 
-class IoTDeviceHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type='application/json'):
-        self.send_response(code)
-        self.send_header('Content-type', content_type)
-        self.end_headers()
+def adas_get_data():
+    # Simulate a data fetch command, for test purposes
+    response = adas_send_command('GET_DATA')
+    return response
 
+def adas_execute_command(cmd):
+    # Send the command to the device and return its response
+    response = adas_send_command(cmd)
+    return response
+
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == '/info':
-            xml_data = adas_request('/info')
-            root = ET.fromstring(xml_data)
-            info = xml_to_dict(root)
-            self._set_headers()
-            self.wfile.write(bytes(str(info), 'utf-8'))
-        elif self.path == '/data':
-            xml_data = adas_request('/data')
-            root = ET.fromstring(xml_data)
-            data = xml_to_dict(root)
-            self._set_headers()
-            self.wfile.write(bytes(str(data), 'utf-8'))
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/info':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(bytes(
+                '{'
+                f'"device_name":"{DEVICE_INFO["device_name"]}",'
+                f'"device_model":"{DEVICE_INFO["device_model"]}",'
+                f'"manufacturer":"{DEVICE_INFO["manufacturer"]}",'
+                f'"device_type":"{DEVICE_INFO["device_type"]}",'
+                f'"primary_protocol":"{DEVICE_INFO["primary_protocol"]}",'
+                f'"data_format":"{DEVICE_INFO["data_format"]}",'
+                f'"device_ip":"{DEVICE_IP}",'
+                f'"device_port":{DEVICE_PORT}'
+                '}', 'utf-8'
+            ))
+        elif parsed_path.path == '/data':
+            xml_data = adas_get_data()
+            # Proxy XML as HTTP stream
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/xml')
+            self.end_headers()
+            self.wfile.write(xml_data.encode('utf-8'))
         else:
-            self._set_headers(404)
-            self.wfile.write(b'{"error":"Endpoint not found"}')
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
 
     def do_POST(self):
-        if self.path == '/cmd':
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length).decode('utf-8')
-            # Assume command is sent as raw string or JSON {"command":"xxx"}
+            post_data = self.rfile.read(content_length)
+            # Expecting XML or simple command string
             try:
-                import json
-                data = json.loads(post_data)
-                command = data.get('command')
-            except Exception:
-                command = post_data.strip()
-            xml_data = adas_request('/cmd', command)
-            root = ET.fromstring(xml_data)
-            resp = xml_to_dict(root)
-            self._set_headers()
-            self.wfile.write(bytes(str(resp), 'utf-8'))
+                try:
+                    # Try parse as XML to extract command
+                    root = ET.fromstring(post_data.decode('utf-8'))
+                    cmd = root.findtext('command')
+                    if not cmd:
+                        cmd = post_data.decode('utf-8')
+                except Exception:
+                    # Not XML, treat as raw command
+                    cmd = post_data.decode('utf-8')
+                response = adas_execute_command(cmd)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/xml')
+                self.end_headers()
+                self.wfile.write(response.encode('utf-8'))
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"<error>{str(e)}</error>".encode('utf-8'))
         else:
-            self._set_headers(404)
-            self.wfile.write(b'{"error":"Endpoint not found"}')
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not Found')
 
     def log_message(self, format, *args):
-        # Silence default HTTP server logging
-        return
+        # Suppress logging to stderr
+        pass
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 def run_server():
-    server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = HTTPServer(server_address, IoTDeviceHandler)
-    print(f'Starting HTTP server at http://{SERVER_HOST}:{SERVER_PORT}')
-    httpd.serve_forever()
+    server = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
+    print(f"Device HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    server.serve_forever()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     run_server()
