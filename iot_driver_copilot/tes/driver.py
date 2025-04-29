@@ -1,92 +1,83 @@
 import os
+import threading
 import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
-import threading
+from urllib.parse import urlparse, parse_qs
 
-# Configuration from environment variables
+# Env config
 DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "8899"))
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
+# Dummy device info (normally fetched from the device)
 DEVICE_INFO = {
     "device_name": "tes",
     "device_model": "tt",
     "manufacturer": "ttt",
     "device_type": "ttt",
-    "connection_protocol": "ttt"
+    "primary_protocol": "ttt"
 }
 
-# Simulated device data function (replace with real protocol logic as needed)
-def get_device_data():
+# Simulated device XML data (normally fetched from the device)
+def get_device_xml_data():
     root = ET.Element("DeviceData")
-    ET.SubElement(root, "DataPoint").text = "tt"
-    ET.SubElement(root, "Status").text = "OK"
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    ET.SubElement(root, "Temperature").text = "23.5"
+    ET.SubElement(root, "Humidity").text = "45"
+    return ET.tostring(root, encoding="utf-8")
 
-def run_device_command():
+# Simulated test command (normally sent to the device)
+def perform_test_command():
     root = ET.Element("TestResult")
-    ET.SubElement(root, "Command").text = "ttt"
-    ET.SubElement(root, "Result").text = "Success"
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    ET.SubElement(root, "Status").text = "Success"
+    ET.SubElement(root, "Message").text = "Device connectivity and command test passed"
+    return ET.tostring(root, encoding="utf-8")
 
-class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
-
-class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_xml_headers(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/xml')
-        self.end_headers()
-
-    def _set_json_headers(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.end_headers()
-
-    def _set_bad_request(self):
-        self.send_response(400)
-        self.send_header('Content-Type', 'application/json')
+class IoTDeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, content_type="application/json", code=200):
+        self.send_response(code)
+        self.send_header("Content-type", content_type)
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/info":
-            self._set_json_headers()
-            self.wfile.write(bytes(
-                '{{"device_name": "{}", "device_model": "{}", "manufacturer": "{}", "device_type": "{}", "connection_protocol": "{}"}}'.format(
-                    DEVICE_INFO["device_name"],
-                    DEVICE_INFO["device_model"],
-                    DEVICE_INFO["manufacturer"],
-                    DEVICE_INFO["device_type"],
-                    DEVICE_INFO["connection_protocol"]
-                ), "utf-8"
-            ))
-        elif self.path == "/data":
-            # Proxy or convert device 'raw' data to HTTP (simulate here)
-            # Real implementation: connect to DEVICE_IP:DEVICE_PORT, receive XML, stream it
-            self._set_xml_headers()
-            data = get_device_data()
-            self.wfile.write(data)
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == "/info":
+            self._set_headers(content_type="application/json")
+            response = {
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "device_type": DEVICE_INFO["device_type"],
+                "primary_protocol": DEVICE_INFO["primary_protocol"]
+            }
+            self.wfile.write(bytes(str(response).replace("'", '"'), "utf-8"))
+        elif parsed_path.path == "/data":
+            # Simulate fetching XML data from the device
+            xml_data = get_device_xml_data()
+            self._set_headers(content_type="application/xml")
+            self.wfile.write(xml_data)
         else:
-            self.send_error(404, "Not found")
+            self._set_headers(code=404)
+            self.wfile.write(b'{"error": "Endpoint not found"}')
 
     def do_POST(self):
-        if self.path == "/test":
-            # Optionally, read POST body for command options; here we ignore it
-            self._set_xml_headers()
-            result = run_device_command()
-            self.wfile.write(result)
+        parsed_path = urlparse(self.path)
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length) if content_length > 0 else b""
+        if parsed_path.path == "/test":
+            # Simulate sending a command to the device
+            xml_result = perform_test_command()
+            self._set_headers(content_type="application/xml")
+            self.wfile.write(xml_result)
         else:
-            self.send_error(404, "Not found")
-
-    def log_message(self, format, *args):
-        return  # Silence log output
+            self._set_headers(code=404)
+            self.wfile.write(b'{"error": "Endpoint not found"}')
 
 def run_server():
-    server = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
-    print(f"Device HTTP driver running at http://{SERVER_HOST}:{SERVER_PORT}/")
-    server.serve_forever()
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, IoTDeviceHTTPRequestHandler)
+    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
     run_server()
