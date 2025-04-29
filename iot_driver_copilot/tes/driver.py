@@ -1,111 +1,103 @@
 import os
-import threading
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
-import xml.etree.ElementTree as ET
+import threading
 
-DEVICE_INFO = {
-    "device_name": "tes",
-    "device_model": "tt",
-    "manufacturer": "ttt",
-    "device_type": "ttt"
-}
-CONNECTION_INFO = {
-    "primary_protocol": "ttt"
-}
-KEY_CHARACTERISTICS = {
-    "data_points": "tt",
-    "commands": "ttt"
-}
-DATA_FORMAT = {
-    "format": "XML"
-}
+# Device mock for demonstration (replace with actual device communication)
+class TesDevice:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.info = {
+            "device_name": "tes",
+            "device_model": "tt",
+            "manufacturer": "ttt",
+            "device_type": "ttt",
+            "primary_protocol": "ttt"
+        }
 
-def get_env(name, default=None, required=False):
+    def get_info(self):
+        return self.info
+
+    def test_command(self):
+        # Simulate executing a command on the device
+        return {"result": "ok", "message": "Device test command executed successfully."}
+
+    def get_data(self):
+        # Simulate XML data from device
+        root = ET.Element("DeviceData")
+        point = ET.SubElement(root, "DataPoint")
+        point.set("name", "tt")
+        point.text = "23.5"
+        status = ET.SubElement(root, "Status")
+        status.text = "OK"
+        return ET.tostring(root, encoding="utf-8", method="xml")
+
+
+def get_env_var(name, default=None, required=False):
     val = os.environ.get(name, default)
     if required and val is None:
-        raise EnvironmentError(f"Missing required environment variable: {name}")
+        raise RuntimeError(f"Missing required environment variable: {name}")
     return val
 
-DEVICE_IP = get_env("DEVICE_IP", required=True)
-DEVICE_PORT = int(get_env("DEVICE_PORT", 9000))
-SERVER_HOST = get_env("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(get_env("SERVER_PORT", 8080))
+DEVICE_IP = get_env_var("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(get_env_var("DEVICE_PORT", "9000"))
+SERVER_HOST = get_env_var("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(get_env_var("SERVER_PORT", "8080"))
 
-def fake_device_request_xml(path, method="GET", payload=None):
-    """
-    Simulate a connection to a device over 'ttt' protocol,
-    returning XML-formatted responses. Replace this with a
-    real protocol implementation if available.
-    """
-    # All responses are XML
-    if path == "/data" and method == "GET":
-        root = ET.Element("DeviceData")
-        ET.SubElement(root, "Temperature").text = "23.5"
-        ET.SubElement(root, "Humidity").text = "41.2"
-        return ET.tostring(root, encoding='utf-8', method='xml')
-    elif path == "/test" and method == "POST":
-        root = ET.Element("TestResult")
-        ET.SubElement(root, "Status").text = "Success"
-        ET.SubElement(root, "Message").text = "Device responded to test command."
-        return ET.tostring(root, encoding='utf-8', method='xml')
-    return None
+tes_device = TesDevice(DEVICE_IP, DEVICE_PORT)
 
 class Handler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type="application/json"):
-        self.send_response(code)
-        self.send_header('Content-type', content_type)
-        self.end_headers()
-
     def do_GET(self):
         if self.path == "/info":
-            self._set_headers(200, "application/json")
-            resp = {
-                "device_info": DEVICE_INFO,
-                "connection_info": CONNECTION_INFO,
-                "key_characteristics": KEY_CHARACTERISTICS,
-                "data_format": DATA_FORMAT
+            info = tes_device.get_info()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            data = {
+                "device_name": info["device_name"],
+                "device_model": info["device_model"],
+                "manufacturer": info["manufacturer"],
+                "primary_protocol": info["primary_protocol"],
             }
-            self.wfile.write(bytes(str(resp).replace("'", '"'), "utf-8"))
+            self.wfile.write(bytes(str(data).replace("'", '"'), "utf-8"))
         elif self.path == "/data":
-            xml_data = fake_device_request_xml("/data", "GET")
-            if xml_data:
-                self._set_headers(200, "application/xml")
-                self.wfile.write(xml_data)
-            else:
-                self._set_headers(500)
-                self.wfile.write(b"<error>Could not retrieve data</error>")
+            xml_data = tes_device.get_data()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.end_headers()
+            self.wfile.write(xml_data)
         else:
-            self._set_headers(404)
-            self.wfile.write(b"Not Found")
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         if self.path == "/test":
-            content_length = int(self.headers.get('Content-Length', 0))
-            _ = self.rfile.read(content_length) if content_length > 0 else None
-            xml_data = fake_device_request_xml("/test", "POST")
-            if xml_data:
-                self._set_headers(200, "application/xml")
-                self.wfile.write(xml_data)
-            else:
-                self._set_headers(500)
-                self.wfile.write(b"<error>Test command failed</error>")
+            length = int(self.headers.get('Content-Length', 0))
+            _ = self.rfile.read(length) if length > 0 else None
+            result = tes_device.test_command()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(bytes(str(result).replace("'", '"'), "utf-8"))
         else:
-            self._set_headers(404)
-            self.wfile.write(b"Not Found")
+            self.send_response(404)
+            self.end_headers()
 
     def log_message(self, format, *args):
-        # Silence the default HTTP server logging
-        return
+        return  # Suppress log output
+
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    pass
+    daemon_threads = True
 
-def run_server():
+
+def run():
     server_address = (SERVER_HOST, SERVER_PORT)
     httpd = ThreadedHTTPServer(server_address, Handler)
-    print(f"Starting HTTP server at http://{SERVER_HOST}:{SERVER_PORT}")
+    print(f"Serving HTTP on {SERVER_HOST}:{SERVER_PORT} (device at {DEVICE_IP}:{DEVICE_PORT})")
     httpd.serve_forever()
 
 if __name__ == "__main__":
-    run_server()
+    run()
