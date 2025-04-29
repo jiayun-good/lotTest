@@ -3,31 +3,34 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 
 DEVICE_INFO = {
-    "device_name": "dassad",
-    "device_model": "das",
-    "manufacturer": "sad",
-    "device_type": "sad"
+    "device_name": os.environ.get("DEVICE_NAME", "dassad"),
+    "device_model": os.environ.get("DEVICE_MODEL", "das"),
+    "manufacturer": os.environ.get("MANUFACTURER", "sad"),
+    "device_type": os.environ.get("DEVICE_TYPE", "sad")
 }
 
-HTTP_HOST = os.environ.get("HTTP_HOST", "0.0.0.0")
-HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
 class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status_code=200, content_type="application/json"):
+        self.send_response(status_code)
+        self.send_header("Content-type", content_type)
+        self.end_headers()
+
     def do_GET(self):
         if self.path == "/info":
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(DEVICE_INFO).encode('utf-8'))
+            self._set_headers()
+            self.wfile.write(json.dumps(DEVICE_INFO).encode("utf-8"))
         else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'Not Found')
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
 
-def run(server_class=HTTPServer, handler_class=DeviceHTTPRequestHandler):
-    server_address = (HTTP_HOST, HTTP_PORT)
-    httpd = server_class(server_address, handler_class)
+def run_server():
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
+    print(f"HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}/")
     httpd.serve_forever()
 
 if __name__ == "__main__":
-    run()
+    run_server()
