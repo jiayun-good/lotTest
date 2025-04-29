@@ -9,8 +9,8 @@ DEVICE_INFO = {
     "device_type": "sad"
 }
 
-HTTP_HOST = os.environ.get("HTTP_SERVER_HOST", "0.0.0.0")
-HTTP_PORT = int(os.environ.get("HTTP_SERVER_PORT", "8080"))
+HTTP_HOST = os.environ.get("HTTP_HOST", "0.0.0.0")
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
 
 class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -22,15 +22,11 @@ class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
-            self.wfile.write(b'{"error": "Not Found"}')
+            self.wfile.write(b'Not Found')
 
-    def log_message(self, format, *args):
-        # Suppress default logging for cleaner output
-        return
-
-def run():
+def run(server_class=HTTPServer, handler_class=DeviceHTTPRequestHandler):
     server_address = (HTTP_HOST, HTTP_PORT)
-    httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
+    httpd = server_class(server_address, handler_class)
     httpd.serve_forever()
 
 if __name__ == "__main__":
