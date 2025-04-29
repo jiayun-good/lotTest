@@ -3,81 +3,76 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
-# Mock device communication (replace with real protocol logic as necessary)
-class TTTDeviceClient:
-    def __init__(self, device_ip, device_port, timeout=5):
-        self.device_ip = device_ip
-        self.device_port = device_port
-        self.timeout = timeout
+DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+
+# Mock device: Simulate device communication for demo
+class TttDeviceClient:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
 
     def get_data_points(self):
-        # Simulate fetching data points from the device
-        return {"temperature": 23.5, "humidity": 60, "status": "ok"}
+        # Simulate a device data fetch, e.g., via TCP socket or custom protocol
+        # Replace with actual communication logic as needed
+        return {
+            "temperature": 25.3,
+            "humidity": 48.7,
+            "status": "OK"
+        }
 
-    def send_command(self, command):
-        # Simulate sending a command to the device
-        return {"success": True, "command": command}
+    def send_command(self, cmd_payload):
+        # Simulate command send; parse and respond
+        if cmd_payload.get('action') == 'reset':
+            return {"result": "Device reset"}
+        elif cmd_payload.get('action') == 'ping':
+            return {"result": "pong"}
+        else:
+            return {"result": "Unknown command", "error": True}
 
+device_client = TttDeviceClient(DEVICE_IP, DEVICE_PORT)
 
-class IoTHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _send_json(self, obj, status=200):
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json')
+class Handler(BaseHTTPRequestHandler):
+    def _set_headers(self, code=200, content_type="application/json"):
+        self.send_response(code)
+        self.send_header("Content-type", content_type)
         self.end_headers()
-        self.wfile.write(json.dumps(obj).encode('utf-8'))
 
     def do_GET(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == '/data':
-            data = self.server.device_client.get_data_points()
-            self._send_json({"data_points": data})
+        if parsed_path.path == "/data":
+            data = device_client.get_data_points()
+            self._set_headers()
+            self.wfile.write(json.dumps(data).encode('utf-8'))
         else:
-            self.send_error(404, "Endpoint not found.")
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
 
     def do_POST(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == '/cmd':
+        if parsed_path.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            post_body = self.rfile.read(content_length)
+            post_data = self.rfile.read(content_length)
             try:
-                payload = json.loads(post_body.decode('utf-8'))
+                payload = json.loads(post_data.decode('utf-8'))
             except Exception:
-                self._send_json({"error": "Invalid JSON."}, status=400)
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode('utf-8'))
                 return
-            if "command" not in payload:
-                self._send_json({"error": "Missing 'command' field."}, status=400)
-                return
-            result = self.server.device_client.send_command(payload["command"])
-            self._send_json(result)
+            result = device_client.send_command(payload)
+            self._set_headers()
+            self.wfile.write(json.dumps(result).encode('utf-8'))
         else:
-            self.send_error(404, "Endpoint not found.")
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
 
-    def log_message(self, format, *args):
-        # Silence default http.server logging
-        pass
+def run(server_class=HTTPServer, handler_class=Handler):
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = server_class(server_address, handler_class)
+    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
 
-
-def main():
-    # Load configuration from environment variables
-    DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-    DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
-    SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-    SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
-
-    device_client = TTTDeviceClient(DEVICE_IP, DEVICE_PORT)
-
-    class CustomHTTPServer(HTTPServer):
-        def __init__(self, server_address, RequestHandlerClass, device_client):
-            super().__init__(server_address, RequestHandlerClass)
-            self.device_client = device_client
-
-    httpd = CustomHTTPServer((SERVER_HOST, SERVER_PORT), IoTHTTPRequestHandler, device_client)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    run()
