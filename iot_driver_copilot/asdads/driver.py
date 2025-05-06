@@ -2,89 +2,113 @@ import os
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-import threading
 
-# Device configuration from environment variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", 9000))
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", 8080))
+DEVICE_NAME = os.environ.get('DEVICE_NAME', 'asdads')
+DEVICE_MODEL = os.environ.get('DEVICE_MODEL', 'ads')
+MANUFACTURER = os.environ.get('MANUFACTURER', 'asddas')
+DEVICE_TYPE = os.environ.get('DEVICE_TYPE', 'asd')
+PRIMARY_PROTOCOL = os.environ.get('PRIMARY_PROTOCOL', 'asd')
 
-# Device information
-DEVICE_INFO = {
-    "device_name": "asdads",
-    "device_model": "ads",
-    "manufacturer": "asddas",
-    "device_type": "asd",
-    "primary_protocol": "asd"
-}
+DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
 
-# Shared state for demonstration (simulate device)
-device_state = {
-    "value": 42  # Example data point
-}
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-def read_device_data():
-    # Simulate reading from device with proprietary 'asd' protocol over TCP
-    # In a real implementation, replace with protocol-specific communication.
-    # This function would connect to DEVICE_IP:DEVICE_PORT, send a request, and parse the response.
-    return {"data_points": device_state["value"]}
+class DeviceDriverHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers_json(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
 
-def send_device_command(cmd):
-    # Simulate sending a command to the device over the asd protocol
-    # In a real implementation, send 'cmd' appropriately to the device.
-    # Here, we update the state for demonstration.
-    if isinstance(cmd, dict) and "set_value" in cmd:
-        device_state["value"] = cmd["set_value"]
-        return {"status": "success", "new_value": device_state["value"]}
-    return {"status": "unknown_command"}
-
-class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status=200, content_type="application/json"):
-        self.send_response(status)
-        self.send_header('Content-type', content_type)
+    def _set_headers(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
         self.end_headers()
 
     def do_GET(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == "/info":
-            self._set_headers()
-            self.wfile.write(json.dumps({
-                "device_name": DEVICE_INFO["device_name"],
-                "device_model": DEVICE_INFO["device_model"],
-                "manufacturer": DEVICE_INFO["manufacturer"],
-                "connection_protocol": DEVICE_INFO["primary_protocol"]
-            }).encode())
-        elif parsed_path.path == "/data":
-            self._set_headers()
-            data = read_device_data()
+        if parsed_path.path == '/info':
+            self._set_headers_json()
+            info = {
+                "device_name": DEVICE_NAME,
+                "device_model": DEVICE_MODEL,
+                "manufacturer": MANUFACTURER,
+                "device_type": DEVICE_TYPE,
+                "primary_protocol": PRIMARY_PROTOCOL
+            }
+            self.wfile.write(json.dumps(info).encode())
+        elif parsed_path.path == '/data':
+            self._set_headers_json()
+            data = self.fetch_device_data()
             self.wfile.write(json.dumps(data).encode())
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self.send_error(404, "Not Found")
 
     def do_POST(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == "/cmd":
+        if parsed_path.path == '/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
             try:
-                command = json.loads(body)
+                payload = json.loads(body.decode())
             except Exception:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+                self.send_error(400, "Invalid JSON")
                 return
-            result = send_device_command(command)
-            self._set_headers()
+            result = self.send_device_command(payload)
+            self._set_headers_json()
             self.wfile.write(json.dumps(result).encode())
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self.send_error(404, "Not Found")
 
-def run_server():
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
-    print(f"HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    def fetch_device_data(self):
+        # Simulate fetching data from device over TCP (raw protocol "asd"), converting to JSON
+        try:
+            import socket
+            with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=3) as s:
+                s.sendall(b'GET_DATA\n')
+                raw = b''
+                while True:
+                    part = s.recv(4096)
+                    if not part:
+                        break
+                    raw += part
+            try:
+                # Try to parse as JSON
+                return json.loads(raw.decode())
+            except Exception:
+                # Fallback: wrap raw data
+                return {"raw_data": raw.decode(errors='ignore')}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def send_device_command(self, cmd):
+        # Simulate sending a command to the device over TCP (raw protocol "asd")
+        try:
+            import socket
+            with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=3) as s:
+                s.sendall(json.dumps(cmd).encode() + b'\n')
+                response = b''
+                while True:
+                    part = s.recv(4096)
+                    if not part:
+                        break
+                    response += part
+            try:
+                return {"result": json.loads(response.decode())}
+            except Exception:
+                return {"result": response.decode(errors='ignore')}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def log_message(self, format, *args):
+        # Suppress default logging
+        return
+
+def run():
+    server = HTTPServer((SERVER_HOST, SERVER_PORT), DeviceDriverHTTPRequestHandler)
+    print(f"Device driver HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}/")
     server.serve_forever()
 
 if __name__ == "__main__":
-    run_server()
+    run()
