@@ -1,20 +1,16 @@
 import os
-import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import socketserver
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+import xml.etree.ElementTree as ET
 
-# Mock device communication functions
-def fetch_device_data(ip, port):
-    # Simulate fetching XML data from device
-    # In a real driver, this would open a socket or HTTP connection to the device.
-    return """<?xml version="1.0"?><data><point1>123</point1><point2>456</point2></data>"""
+# Load configurations from environment variables
+DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
-def send_device_command(ip, port, command_xml):
-    # Simulate sending a command to the device, and getting a response
-    # In a real driver, this would send XML over TCP/HTTP to the device.
-    return """<?xml version="1.0"?><response><status>success</status></response>"""
-
+# Device static info
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -22,66 +18,90 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status=200, content_type="application/xml"):
-        self.send_response(status)
+# Simulate device data
+def fetch_device_data():
+    # Connect to device's raw protocol port (simulate XML data over TCP)
+    try:
+        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect((DEVICE_IP, DEVICE_PORT))
+            sock.sendall(b"<getData/>")
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        # Parse to ensure it's XML (just as an example)
+        root = ET.fromstring(data.decode('utf-8'))
+        return data.decode('utf-8')
+    except Exception as e:
+        # Return a simple XML error
+        return f"<error>{str(e)}</error>"
+
+def send_device_command(command_xml):
+    # Send command to device (simulate XML command over TCP)
+    try:
+        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect((DEVICE_IP, DEVICE_PORT))
+            sock.sendall(command_xml.encode('utf-8'))
+            data = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        # Assume response is XML
+        root = ET.fromstring(data.decode('utf-8'))
+        return data.decode('utf-8')
+    except Exception as e:
+        return f"<error>{str(e)}</error>"
+
+class Handler(BaseHTTPRequestHandler):
+    def _set_headers(self, code=200, content_type="application/xml"):
+        self.send_response(code)
         self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/info":
+        if self.path == "/info":
             self._set_headers(200, "application/json")
-            info = {
-                "device_name": DEVICE_INFO["device_name"],
-                "device_model": DEVICE_INFO["device_model"],
-                "manufacturer": DEVICE_INFO["manufacturer"],
-                "device_type": DEVICE_INFO["device_type"]
-            }
-            import json
-            self.wfile.write(json.dumps(info).encode())
-            return
-        elif parsed.path == "/data":
+            self.wfile.write(bytes(str(DEVICE_INFO).replace("'", '"'), "utf-8"))
+        elif self.path == "/data":
+            xml_data = fetch_device_data()
             self._set_headers(200, "application/xml")
-            xml_data = fetch_device_data(
-                os.environ.get("DEVICE_IP"),
-                int(os.environ.get("DEVICE_PORT", "80"))
-            )
-            self.wfile.write(xml_data.encode())
-            return
+            self.wfile.write(xml_data.encode('utf-8'))
         else:
             self._set_headers(404, "text/plain")
-            self.wfile.write(b"Not Found")
+            self.wfile.write(b"Not found")
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == "/cmd":
+        if self.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            command_xml = post_data.decode()
-            resp = send_device_command(
-                os.environ.get("DEVICE_IP"),
-                int(os.environ.get("DEVICE_PORT", "80")),
-                command_xml
-            )
-            self._set_headers(200, "application/xml")
-            self.wfile.write(resp.encode())
-            return
+            try:
+                # Assume command is XML in body
+                command_xml = post_data.decode('utf-8')
+                # Validate XML
+                ET.fromstring(command_xml)
+                resp = send_device_command(command_xml)
+                self._set_headers(200, "application/xml")
+                self.wfile.write(resp.encode('utf-8'))
+            except Exception as e:
+                self._set_headers(400, "application/xml")
+                self.wfile.write(f"<error>{str(e)}</error>".encode('utf-8'))
         else:
             self._set_headers(404, "text/plain")
-            self.wfile.write(b"Not Found")
+            self.wfile.write(b"Not found")
 
-def run():
-    server_host = os.environ.get("SERVER_HOST", "0.0.0.0")
-    server_port = int(os.environ.get("SERVER_PORT", "8080"))
-    httpd = HTTPServer((server_host, server_port), DeviceHTTPRequestHandler)
-    print(f"Starting HTTP server on {server_host}:{server_port}")
-    httpd.serve_forever()
+    def log_message(self, format, *args):
+        return  # Suppress default logging to stdout
+
+def run_server():
+    server = HTTPServer((SERVER_HOST, SERVER_PORT), Handler)
+    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    server.serve_forever()
 
 if __name__ == "__main__":
-    # Ensure required environment variables are set
-    for var in ["DEVICE_IP"]:
-        if not os.environ.get(var):
-            print(f"Environment variable {var} is required.")
-            sys.exit(1)
-    run()
+    run_server()
