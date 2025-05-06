@@ -2,136 +2,170 @@ import os
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse
 
-# Environment variable configuration
-DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '8000'))
-SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
-DEVICE_USER = os.environ.get('DEVICE_USER', 'admin')
-DEVICE_PASS = os.environ.get('DEVICE_PASS', '12345')
+# Configuration from environment variables
+DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "8000"))
+DEVICE_USER = os.environ.get("DEVICE_USER", "admin")
+DEVICE_PASS = os.environ.get("DEVICE_PASS", "")
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
-# Mocked device SDK communication
-# In a real implementation, this would use actual SDK or socket protocol
-class HikAlarmHostDevice:
-    def __init__(self, ip, port, user, password):
-        self.ip = ip
-        self.port = port
-        self.user = user
-        self.password = password
+# Simulated Device State (replace with actual SDK/protocol integration)
+device_state = {
+    "alarm_state": "inactive",
+    "zones": {
+        "1": {"status": "normal", "bypassed": False},
+        "2": {"status": "alarm", "bypassed": False},
+        "3": {"status": "normal", "bypassed": True}
+    },
+    "subsystems": {
+        "A": {"armed": False, "alarm": False},
+        "B": {"armed": True, "alarm": True}
+    },
+    "battery_voltage": 12.7,
+    "sensors": {
+        "water": 0,
+        "dust": 5,
+        "noise": 20,
+        "environmental": {"temp": 24.2, "humidity": 55}
+    }
+}
+
+lock = threading.Lock()
+
+class AlarmHostDevice:
+    def clear_alarm(self):
+        with lock:
+            device_state["alarm_state"] = "inactive"
+            for k in device_state["subsystems"]:
+                device_state["subsystems"][k]["alarm"] = False
+            return True
 
     def get_status(self):
-        # Simulate binary to structured data decode
-        # Replace this with actual device communication
-        return {
-            "alarm_state": "armed",
-            "zones": [
-                {"id": 1, "status": "normal"},
-                {"id": 2, "status": "bypassed"},
-                {"id": 3, "status": "alarm"},
-            ],
-            "battery_voltage": 12.5,
-            "sensor_readings": {
-                "water": False,
-                "dust": 10,
-                "noise": 30,
-                "environmental": {"temp": 21.5, "humidity": 40}
-            },
-            "device_time": "2024-06-05T12:00:00Z"
-        }
+        with lock:
+            return {
+                "alarm_state": device_state["alarm_state"],
+                "zones": device_state["zones"],
+                "subsystems": device_state["subsystems"],
+                "battery_voltage": device_state["battery_voltage"],
+                "sensors": device_state["sensors"]
+            }
 
-    def clear_alarm(self):
-        # Simulate clearing the alarm
-        return {"success": True, "message": "Alarms cleared."}
+    def bypass_zone(self, zone_id, bypass):
+        with lock:
+            if zone_id in device_state["zones"]:
+                device_state["zones"][zone_id]["bypassed"] = bool(bypass)
+                return True
+            return False
 
-    def subsystem_op(self, subsystem_id, action):
-        # Simulate arming/disarming/clearing alarm for a subsystem
-        if action not in ["arm", "disarm", "clear_alarm"]:
-            return {"success": False, "message": "Invalid action"}
-        return {"success": True, "subsystem_id": subsystem_id, "action": action, "message": f"Subsystem {subsystem_id} {action}ed."}
+    def manage_subsystem(self, subsys_id, action):
+        with lock:
+            subsys = device_state["subsystems"].get(subsys_id)
+            if not subsys:
+                return False
+            if action == "arm":
+                subsys["armed"] = True
+            elif action == "disarm":
+                subsys["armed"] = False
+            elif action == "clear_alarm":
+                subsys["alarm"] = False
+            else:
+                return False
+            return True
 
-    def zone_bypass(self, zone_id, bypass):
-        # Simulate bypassing or reinstating a zone
-        return {"success": True, "zone_id": zone_id, "bypassed": bool(bypass), "message": f"Zone {zone_id} {'bypassed' if bypass else 'reinstated'}."}
+device = AlarmHostDevice()
 
-# Instantiate device connection
-device = HikAlarmHostDevice(DEVICE_IP, DEVICE_PORT, DEVICE_USER, DEVICE_PASS)
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
 
-class SimpleAlarmHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status_code=200):
-        self.send_response(status_code)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
+    def _send_json(self, obj, status=200):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
 
-    def _parse_post_data(self):
+    def _parse_post(self):
         content_length = int(self.headers.get('Content-Length', 0))
         if content_length == 0:
             return {}
-        post_data = self.rfile.read(content_length)
-        try:
-            data = json.loads(post_data.decode('utf-8'))
-        except Exception:
-            data = {}
-        return data
-
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+        content_type = self.headers.get('Content-Type', "")
+        raw = self.rfile.read(content_length)
+        if content_type.startswith("application/json"):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {}
+        elif content_type.startswith("application/x-www-form-urlencoded"):
+            return {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+        else:
+            return {}
 
     def do_GET(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == '/status':
-            self._set_headers()
+        parsed = urlparse(self.path)
+        if parsed.path == "/status":
             status = device.get_status()
-            self.wfile.write(json.dumps(status).encode('utf-8'))
+            self._send_json({
+                "success": True,
+                "data": status
+            })
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            self.send_error(404, "Not Found")
 
     def do_POST(self):
-        parsed_path = urlparse(self.path)
-        data = self._parse_post_data()
+        parsed = urlparse(self.path)
+        # /alarm/clear
+        if parsed.path == "/alarm/clear":
+            ok = device.clear_alarm()
+            self._send_json({"success": ok})
 
-        if parsed_path.path == '/alarm/clear':
-            result = device.clear_alarm()
-            self._set_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
-
-        elif parsed_path.path == '/subsys':
-            subsystem_id = data.get("subsystem_id")
-            action = data.get("action")
-            if subsystem_id is None or action is None:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"success": False, "message": "Missing 'subsystem_id' or 'action'."}).encode('utf-8'))
-                return
-            result = device.subsystem_op(subsystem_id, action)
-            self._set_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
-
-        elif parsed_path.path == '/zone/bypass':
+        # /zone/bypass
+        elif parsed.path == "/zone/bypass":
+            data = self._parse_post()
             zone_id = data.get("zone_id")
             bypass = data.get("bypass")
             if zone_id is None or bypass is None:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"success": False, "message": "Missing 'zone_id' or 'bypass'."}).encode('utf-8'))
+                self._send_json({"success": False, "error": "Missing zone_id or bypass"}, status=400)
                 return
-            result = device.zone_bypass(zone_id, bypass)
-            self._set_headers()
-            self.wfile.write(json.dumps(result).encode('utf-8'))
+            try:
+                bypass = bool(int(bypass)) if isinstance(bypass, str) else bool(bypass)
+            except Exception:
+                self._send_json({"success": False, "error": "Invalid bypass value"}, status=400)
+                return
+            ok = device.bypass_zone(str(zone_id), bypass)
+            if ok:
+                self._send_json({"success": True})
+            else:
+                self._send_json({"success": False, "error": "Zone not found"}, status=404)
+
+        # /subsys
+        elif parsed.path == "/subsys":
+            data = self._parse_post()
+            subsys_id = data.get("subsys_id")
+            action = data.get("action")
+            if not subsys_id or not action:
+                self._send_json({"success": False, "error": "Missing subsys_id or action"}, status=400)
+                return
+            ok = device.manage_subsystem(str(subsys_id), action)
+            if ok:
+                self._send_json({"success": True})
+            else:
+                self._send_json({"success": False, "error": "Invalid subsystem or action"}, status=400)
 
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            self.send_error(404, "Not Found")
+
+    def log_message(self, format, *args):
+        # Optional: comment out to silence log or redirect elsewhere
+        pass
 
 def run_server():
     server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = HTTPServer(server_address, SimpleAlarmHTTPRequestHandler)
-    print(f"Alarm Host HTTP Server running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    print(f"Alarm Host HTTP driver started at http://{SERVER_HOST}:{SERVER_PORT}")
     httpd.serve_forever()
 
 if __name__ == "__main__":
