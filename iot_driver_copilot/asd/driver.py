@@ -1,89 +1,102 @@
 import os
 import csv
 import io
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
 import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
-# Read configuration from environment variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-DSA_PORT = int(os.environ.get("DSA_PORT", "9000"))  # Port to connect to dsa device
+# Device info from environment variables
+DEVICE_NAME = os.environ.get('DEVICE_NAME', 'asd')
+DEVICE_MODEL = os.environ.get('DEVICE_MODEL', 'sda')
+DEVICE_MANUFACTURER = os.environ.get('DEVICE_MANUFACTURER', 'sad')
+DEVICE_TYPE = os.environ.get('DEVICE_TYPE', 'asd')
 
-DEVICE_INFO = {
-    "device_name": "asd",
-    "device_model": "sda",
-    "manufacturer": "sad",
-    "device_type": "asd"
-}
+# Device connection info
+DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
 
-# Example real-time data points (simulate CSV data)
+# HTTP server configuration
+HTTP_HOST = os.environ.get('HTTP_HOST', '0.0.0.0')
+HTTP_PORT = int(os.environ.get('HTTP_PORT', '8080'))
+
+# Simulated data points and commands for demo purposes
 DATA_POINTS = [
-    ["timestamp", "temperature", "humidity", "status"],
-    ["2024-06-12T12:34:56Z", "23.1", "40", "OK"],
-    ["2024-06-12T12:35:56Z", "23.2", "41", "OK"]
+    {'timestamp': '2024-06-01T10:00:00Z', 'value': 23.2},
+    {'timestamp': '2024-06-01T10:01:00Z', 'value': 24.1},
+    {'timestamp': '2024-06-01T10:02:00Z', 'value': 22.9},
 ]
 
-# Simulate device connection, real device logic/connection should be implemented here
-def get_device_csv_data():
-    # In a real implementation, connect to the DSA device (e.g., using socket), retrieve and parse CSV data
+SUPPORTED_COMMANDS = ['start', 'stop', 'diagnose']
+
+# Simulate device protocol connection and data fetching
+def fetch_device_csv_data():
     output = io.StringIO()
-    writer = csv.writer(output)
+    writer = csv.DictWriter(output, fieldnames=['timestamp', 'value'])
+    writer.writeheader()
     for row in DATA_POINTS:
         writer.writerow(row)
     return output.getvalue()
 
-def send_device_command(command):
-    # In a real implementation, connect to the DSA device and send the command, then get response
-    # For demonstration, simply echo the command
-    return {"result": "success", "command": command}
+def send_device_command(cmd):
+    if cmd not in SUPPORTED_COMMANDS:
+        return {'status': 'error', 'message': f'Unknown command: {cmd}'}
+    # Simulate success
+    return {'status': 'success', 'command': cmd}
 
 class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, content_type="application/json", status=200, extra_headers=None):
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        if extra_headers:
-            for k, v in extra_headers.items():
-                self.send_header(k, v)
+    def send_json(self, obj, code=200):
+        self.send_response(code)
+        self.send_header('Content-Type', 'application/json')
         self.end_headers()
+        self.wfile.write(json.dumps(obj).encode('utf-8'))
 
     def do_GET(self):
-        if self.path == "/info":
-            self._set_headers()
-            self.wfile.write(json.dumps(DEVICE_INFO).encode())
-        elif self.path == "/data":
-            csv_data = get_device_csv_data()
-            self._set_headers(content_type="text/csv")
-            self.wfile.write(csv_data.encode())
+        parsed = urlparse(self.path)
+        if parsed.path == '/info':
+            info = {
+                'device_name': DEVICE_NAME,
+                'device_model': DEVICE_MODEL,
+                'manufacturer': DEVICE_MANUFACTURER,
+                'device_type': DEVICE_TYPE
+            }
+            self.send_json(info)
+        elif parsed.path == '/data':
+            csv_data = fetch_device_csv_data()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/csv')
+            self.end_headers()
+            self.wfile.write(csv_data.encode('utf-8'))
         else:
-            self._set_headers(status=404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not found')
 
     def do_POST(self):
-        if self.path == "/cmd":
-            content_length = int(self.headers.get("Content-Length", 0))
-            post_data = self.rfile.read(content_length)
+        parsed = urlparse(self.path)
+        if parsed.path == '/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length).decode('utf-8')
             try:
-                payload = json.loads(post_data.decode())
-                command = payload.get("command")
-                if not command:
-                    raise ValueError("Missing command")
-                result = send_device_command(command)
-                self._set_headers()
-                self.wfile.write(json.dumps(result).encode())
-            except Exception as e:
-                self._set_headers(status=400)
-                self.wfile.write(json.dumps({"error": str(e)}).encode())
+                data = json.loads(post_data)
+            except Exception:
+                self.send_json({'status': 'error', 'message': 'Invalid JSON'}, code=400)
+                return
+            cmd = data.get('command')
+            if not cmd:
+                self.send_json({'status': 'error', 'message': 'Missing command'}, code=400)
+                return
+            result = send_device_command(cmd)
+            self.send_json(result)
         else:
-            self._set_headers(status=404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'Not found')
 
-def run_server():
-    server_address = (SERVER_HOST, SERVER_PORT)
+def run():
+    server_address = (HTTP_HOST, HTTP_PORT)
     httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
-    print(f"Starting HTTP server on {SERVER_HOST}:{SERVER_PORT}")
+    print(f"Device HTTP driver running at http://{HTTP_HOST}:{HTTP_PORT}")
     httpd.serve_forever()
 
-if __name__ == "__main__":
-    run_server()
+if __name__ == '__main__':
+    run()
