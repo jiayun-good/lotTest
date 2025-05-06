@@ -1,89 +1,135 @@
 import os
 import json
-from flask import Flask, request, Response, jsonify
-
-app = Flask(__name__)
-
-# Environment Variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "12345"))
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-DEVICE_NAME = os.environ.get("DEVICE_NAME", "asdads")
-DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "ads")
-DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "asddas")
-DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "asd")
-DEVICE_PROTOCOL = os.environ.get("DEVICE_PROTOCOL", "asd")
-DATA_POINTS = os.environ.get("DATA_POINTS", "asd")
-COMMANDS = os.environ.get("COMMANDS", "dsa")
-
-# Simulate device communication for demonstration.
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+import threading
 import socket
 
-def fetch_device_data():
-    try:
-        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
-            s.sendall(b'GET_DATA\n')
-            data = s.recv(4096)
-            return data.decode('utf-8')
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-def send_device_command(cmd_payload):
-    try:
-        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
-            s.sendall(b'CMD:' + json.dumps(cmd_payload).encode('utf-8') + b'\n')
-            data = s.recv(4096)
-            return data.decode('utf-8')
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+DEVICE_INFO = {
+    "device_name": "asdads",
+    "device_model": "ads",
+    "manufacturer": "asddas",
+    "device_type": "asd",
+    "primary_protocol": "asd"
+}
 
-@app.route("/info", methods=["GET"])
-def device_info():
-    info = {
-        "device_name": DEVICE_NAME,
-        "device_model": DEVICE_MODEL,
-        "manufacturer": DEVICE_MANUFACTURER,
-        "device_type": DEVICE_TYPE,
-        "connection_protocol": DEVICE_PROTOCOL
-    }
-    return jsonify(info)
+class DeviceConnection:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = port
+        self.lock = threading.Lock()
 
-@app.route("/data", methods=["GET"])
-def device_data():
-    raw = fetch_device_data()
-    try:
-        data = json.loads(raw)
-    except Exception:
-        data = {"raw": raw}
-    return jsonify(data)
-
-@app.route("/cmd", methods=["POST"])
-def device_command():
-    payload = request.get_json(force=True, silent=True)
-    if not payload:
-        return jsonify({"error": "Invalid command payload"}), 400
-    result = send_device_command(payload)
-    try:
-        resp = json.loads(result)
-    except Exception:
-        resp = {"raw": result}
-    return jsonify(resp)
-
-@app.route("/stream", methods=["GET"])
-def device_stream():
-    def stream_generator():
+    def fetch_data(self):
+        # Simulated raw data fetch from device over TCP socket
         try:
-            with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+            with self.lock:
+                s = socket.create_connection((self.ip, self.port), timeout=3)
+                s.sendall(b'GET_DATA\n')
+                chunks = []
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                s.close()
+                data = b''.join(chunks)
+                # Assume device returns JSON bytes
+                return json.loads(data.decode())
+        except Exception as e:
+            return {"error": str(e)}
+
+    def send_command(self, cmd_payload):
+        # Simulated command send over TCP socket
+        try:
+            with self.lock:
+                s = socket.create_connection((self.ip, self.port), timeout=3)
+                s.sendall(b'CMD:' + json.dumps(cmd_payload).encode() + b'\n')
+                resp = s.recv(4096)
+                s.close()
+                return json.loads(resp.decode())
+        except Exception as e:
+            return {"error": str(e)}
+
+    def stream_data(self):
+        # Simulated streaming from device (yields lines or chunks)
+        try:
+            with self.lock:
+                s = socket.create_connection((self.ip, self.port), timeout=3)
                 s.sendall(b'STREAM\n')
                 while True:
-                    chunk = s.recv(1024)
+                    chunk = s.recv(4096)
                     if not chunk:
                         break
                     yield chunk
-        except Exception as e:
-            yield json.dumps({"error": str(e)}).encode('utf-8')
-    return Response(stream_generator(), mimetype="application/octet-stream")
+                s.close()
+        except Exception:
+            return
 
-if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+device_conn = DeviceConnection(DEVICE_IP, DEVICE_PORT)
+
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, code=200, content_type='application/json'):
+        self.send_response(code)
+        self.send_header('Content-type', content_type)
+        self.end_headers()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/info':
+            self._set_headers()
+            info = {
+                "device_name": DEVICE_INFO['device_name'],
+                "device_model": DEVICE_INFO['device_model'],
+                "manufacturer": DEVICE_INFO['manufacturer'],
+                "primary_protocol": DEVICE_INFO['primary_protocol']
+            }
+            self.wfile.write(json.dumps(info).encode())
+        elif parsed.path == '/data':
+            self._set_headers()
+            data = device_conn.fetch_data()
+            self.wfile.write(json.dumps(data).encode())
+        elif parsed.path == '/stream':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            for chunk in device_conn.stream_data():
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'{"error":"Not found"}')
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                cmd_payload = json.loads(body.decode())
+            except Exception:
+                self._set_headers(400)
+                self.wfile.write(b'{"error":"Invalid JSON"}')
+                return
+            result = device_conn.send_command(cmd_payload)
+            self._set_headers()
+            self.wfile.write(json.dumps(result).encode())
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'{"error":"Not found"}')
+
+def run_server():
+    httpd = HTTPServer((SERVER_HOST, SERVER_PORT), SimpleHTTPRequestHandler)
+    print(f'Serving HTTP on {SERVER_HOST}:{SERVER_PORT}')
+    httpd.serve_forever()
+
+if __name__ == '__main__':
+    run_server()
