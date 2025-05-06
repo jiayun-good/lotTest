@@ -1,70 +1,96 @@
 import os
 import csv
 import io
-from flask import Flask, jsonify, Response, request, abort
-
-# Configuration from environment variables
-DEVICE_NAME = os.environ.get("DEVICE_NAME", "asd")
-DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "sda")
-DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "sad")
-DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "asd")
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-DSA_DEVICE_IP = os.environ.get("DSA_DEVICE_IP", "127.0.0.1")
-DSA_DEVICE_PORT = int(os.environ.get("DSA_DEVICE_PORT", "9000"))
-
-# Simulate device data and command interface (as 'dsa' protocol is unspecified)
-class DSASimulator:
-    def __init__(self):
-        self.data_points = [
-            {"timestamp": "2024-01-01T00:00:00Z", "value": 100},
-            {"timestamp": "2024-01-01T00:01:00Z", "value": 105},
-            {"timestamp": "2024-01-01T00:02:00Z", "value": 110},
-        ]
-        self.commands = []
-
-    def get_info(self):
-        return {
-            "device_name": DEVICE_NAME,
-            "device_model": DEVICE_MODEL,
-            "manufacturer": DEVICE_MANUFACTURER,
-            "device_type": DEVICE_TYPE,
-        }
-
-    def get_data_csv(self):
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=["timestamp", "value"])
-        writer.writeheader()
-        for row in self.data_points:
-            writer.writerow(row)
-        return output.getvalue()
-
-    def execute_command(self, cmd):
-        self.commands.append(cmd)
-        return {"result": "success", "command": cmd}
-
-dsa_device = DSASimulator()
+from flask import Flask, Response, jsonify, request
 
 app = Flask(__name__)
 
+# Device info (could be loaded from environment if needed)
+DEVICE_INFO = {
+    "device_name": os.getenv("DEVICE_NAME", "asd"),
+    "device_model": os.getenv("DEVICE_MODEL", "sda"),
+    "manufacturer": os.getenv("MANUFACTURER", "sad"),
+    "device_type": os.getenv("DEVICE_TYPE", "asd"),
+}
+
+# Server config
+HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
+HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
+
+# Simulated device connection config for DSA protocol
+DSA_DEVICE_IP = os.getenv("DSA_DEVICE_IP", "127.0.0.1")
+DSA_DEVICE_PORT = int(os.getenv("DSA_DEVICE_PORT", "9001"))
+
+# Simulated device state
+DEVICE_STATE = {
+    "status": "idle",
+    "last_command": None
+}
+
+def get_device_data():
+    """
+    Simulate retrieving real-time CSV data from the device using DSA protocol.
+    Replace this with actual device communication logic as needed.
+    """
+    # Simulate device data points
+    data_points = [
+        ["timestamp", "temperature", "humidity", "voltage"],
+        ["2024-06-01T12:00:00Z", "25.4", "48.7", "3.7"],
+        ["2024-06-01T12:00:01Z", "25.5", "49.0", "3.7"],
+        ["2024-06-01T12:00:02Z", "25.7", "49.2", "3.6"],
+    ]
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(data_points)
+    return output.getvalue()
+
+def send_device_command(command):
+    """
+    Simulate sending a command to the device over DSA protocol.
+    Replace with actual device command logic as needed.
+    """
+    # Acceptable commands for simulation: start, stop, diagnostic
+    command = command.lower()
+    if command not in ["start", "stop", "diagnostic"]:
+        return False, "Unsupported command"
+    DEVICE_STATE["last_command"] = command
+    if command == "start":
+        DEVICE_STATE["status"] = "running"
+    elif command == "stop":
+        DEVICE_STATE["status"] = "stopped"
+    elif command == "diagnostic":
+        DEVICE_STATE["status"] = "diagnostic"
+    return True, f"Command '{command}' executed"
+
 @app.route("/info", methods=["GET"])
-def get_info():
-    return jsonify(dsa_device.get_info())
+def info():
+    return jsonify({
+        "device_name": DEVICE_INFO["device_name"],
+        "device_model": DEVICE_INFO["device_model"],
+        "manufacturer": DEVICE_INFO["manufacturer"],
+        "device_type": DEVICE_INFO["device_type"],
+        "status": DEVICE_STATE["status"],
+        "last_command": DEVICE_STATE["last_command"]
+    })
 
 @app.route("/data", methods=["GET"])
-def get_data():
-    csv_data = dsa_device.get_data_csv()
-    return Response(csv_data, mimetype='text/csv')
+def data():
+    csv_data = get_device_data()
+    return Response(
+        csv_data,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "inline; filename=device_data.csv"}
+    )
 
 @app.route("/cmd", methods=["POST"])
-def post_cmd():
-    if not request.is_json:
-        abort(400, description="Request must be JSON")
-    content = request.get_json()
-    if "command" not in content:
-        abort(400, description="Missing 'command' in JSON body")
-    result = dsa_device.execute_command(content["command"])
-    return jsonify(result)
+def cmd():
+    req = request.get_json(force=True, silent=True)
+    if not req or "command" not in req:
+        return jsonify({"error": "Missing 'command' in request"}), 400
+    success, msg = send_device_command(req["command"])
+    if not success:
+        return jsonify({"error": msg}), 400
+    return jsonify({"result": msg, "status": DEVICE_STATE["status"]})
 
 if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT)
+    app.run(host=HTTP_HOST, port=HTTP_PORT)
