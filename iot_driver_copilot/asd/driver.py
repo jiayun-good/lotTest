@@ -1,118 +1,117 @@
 import os
 import csv
 import io
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 
-# --- Configuration from Environment Variables ---
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "asd")
+DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "sda")
+DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "sad")
+DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "asd")
+DATA_POINTS = os.environ.get("DATA_POINTS", "sad")
+COMMANDS = os.environ.get("COMMANDS", "sad")
 DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))  # Port for the device's dsa protocol
 
-# --- Device Static Info (could be dynamic if available) ---
-DEVICE_INFO = {
-    "device_name": "asd",
-    "device_model": "sda",
-    "manufacturer": "sad",
-    "device_type": "asd"
+# Simulated device state and data
+device_status = {"operational": True}
+device_data_points = ["temperature", "humidity", "status"]
+device_data = {
+    "temperature": "23.5",
+    "humidity": "56",
+    "status": "OK"
 }
+# Lock for thread safety
+device_lock = threading.Lock()
 
-# --- Simulated Device Protocol Handler ---
-class DSADeviceClient:
-    """
-    Simulates connecting to the device using the proprietary 'dsa' protocol.
-    Replace with actual protocol implementation as needed.
-    """
+def get_device_info():
+    return {
+        "device_name": DEVICE_NAME,
+        "device_model": DEVICE_MODEL,
+        "manufacturer": DEVICE_MANUFACTURER,
+        "device_type": DEVICE_TYPE,
+        "status": "online" if device_status["operational"] else "offline"
+    }
 
-    def __init__(self, device_ip, device_port):
-        self.device_ip = device_ip
-        self.device_port = device_port
-
-    def get_realtime_csv(self):
-        # Simulate fetching CSV data from the device.
-        # In real implementation, connect to device and retrieve CSV.
+def get_device_csv():
+    # Simulate fetching data from device (replace with real protocol communication as needed)
+    with device_lock:
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['timestamp', 'status', 'value'])
-        writer.writerow(['2024-06-01T12:00:00Z', 'OK', '42'])
-        writer.writerow(['2024-06-01T12:00:01Z', 'OK', '43'])
+        # Write header and row
+        writer.writerow(device_data_points)
+        writer.writerow([device_data.get(point, "") for point in device_data_points])
         return output.getvalue()
 
-    def send_command(self, command):
-        # Simulate sending a command to the device and getting a response.
-        # In real implementation, send command via dsa protocol and return result.
+
+def handle_device_command(command):
+    # Simulate command processing (replace with real protocol communication as needed)
+    with device_lock:
         if command == "start":
-            return {"result": "started"}
+            device_status["operational"] = True
+            device_data["status"] = "OK"
         elif command == "stop":
-            return {"result": "stopped"}
+            device_status["operational"] = False
+            device_data["status"] = "Stopped"
         elif command == "diagnostic":
-            return {"result": "diagnostic complete", "status": "OK"}
+            return {"result": "All systems nominal"}
         else:
-            return {"result": "unknown command"}
+            return {"error": "Unknown command"}
+    return {"result": "Command executed"}
 
-# --- HTTP Server Handler ---
+
 class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    device_client = DSADeviceClient(DEVICE_IP, DEVICE_PORT)
-
-    def _set_headers(self, status=200, content_type="application/json"):
-        self.send_response(status)
-        self.send_header('Content-Type', content_type)
-        self.send_header('Access-Control-Allow-Origin', '*')
+    def _set_headers(self, status_code=200, content_type="application/json"):
+        self.send_response(status_code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
     def do_GET(self):
-        if self.path == '/info':
+        if self.path == "/info":
             self._set_headers()
-            self.wfile.write(json.dumps(DEVICE_INFO).encode('utf-8'))
-        elif self.path == '/data':
-            csv_data = self.device_client.get_realtime_csv()
+            info = get_device_info()
+            self.wfile.write(json.dumps(info).encode("utf-8"))
+        elif self.path == "/data":
             self._set_headers(content_type="text/csv")
-            self.wfile.write(csv_data.encode('utf-8'))
+            csv_data = get_device_csv()
+            self.wfile.write(csv_data.encode("utf-8"))
         else:
             self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
 
     def do_POST(self):
-        if self.path == '/cmd':
+        if self.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            content_type = self.headers.get('Content-Type', '')
-            if 'application/json' in content_type:
-                post_data = self.rfile.read(content_length).decode('utf-8')
-                try:
-                    payload = json.loads(post_data)
-                    command = payload.get("command")
-                    if not command:
-                        self._set_headers(400)
-                        self.wfile.write(json.dumps({"error": "Missing command"}).encode('utf-8'))
-                        return
-                    response = self.device_client.send_command(command)
-                    self._set_headers()
-                    self.wfile.write(json.dumps(response).encode('utf-8'))
-                except Exception as e:
-                    self._set_headers(400)
-                    self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
-            else:
-                self._set_headers(415)
-                self.wfile.write(json.dumps({"error": "Content-Type must be application/json"}).encode('utf-8'))
+            post_data = self.rfile.read(content_length).decode("utf-8")
+            try:
+                data = json.loads(post_data)
+                command = data.get("command")
+                if not command:
+                    raise ValueError
+            except Exception:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid command format"}).encode("utf-8"))
+                return
+            result = handle_device_command(command)
+            self._set_headers()
+            self.wfile.write(json.dumps(result).encode("utf-8"))
         else:
             self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
 
-    def log_message(self, format, *args):
-        # Suppress standard logging to keep output clean
-        return
-
-# --- Threaded Server ---
-class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+    def do_OPTIONS(self):
+        self.send_response(200, "ok")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
 def run_server():
-    server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = ThreadedHTTPServer(server_address, DeviceHTTPRequestHandler)
-    print(f"Device HTTP driver running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd = HTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
+    print(f"Device HTTP driver running at http://{SERVER_HOST}:{SERVER_PORT}")
     httpd.serve_forever()
 
 if __name__ == "__main__":
