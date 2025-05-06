@@ -1,120 +1,89 @@
 import os
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
-import threading
-import socket
+from flask import Flask, request, Response, jsonify
 
+app = Flask(__name__)
+
+# Environment Variables
 DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "12345"))
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "asdads")
+DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "ads")
+DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "asddas")
+DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "asd")
+DEVICE_PROTOCOL = os.environ.get("DEVICE_PROTOCOL", "asd")
+DATA_POINTS = os.environ.get("DATA_POINTS", "asd")
+COMMANDS = os.environ.get("COMMANDS", "dsa")
 
-DEVICE_INFO = {
-    "device_name": "asdads",
-    "device_model": "ads",
-    "manufacturer": "asddas",
-    "device_type": "asd",
-    "primary_protocol": "asd"
-}
+# Simulate device communication for demonstration.
+import socket
 
-class SimpleASDClient:
-    # Simulate raw device 'asd' protocol: Connect, send command, fetch data
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
+def fetch_device_data():
+    try:
+        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+            s.sendall(b'GET_DATA\n')
+            data = s.recv(4096)
+            return data.decode('utf-8')
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
-    def send_command(self, command_payload):
-        # Simulate sending a command and receiving ack
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
-            s.connect((self.ip, self.port))
-            message = json.dumps(command_payload).encode('utf-8')
-            s.sendall(message)
-            resp = s.recv(1024)
-            try:
-                return json.loads(resp.decode("utf-8"))
-            except Exception:
-                return {"status": "error", "response": resp.decode("utf-8")}
+def send_device_command(cmd_payload):
+    try:
+        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+            s.sendall(b'CMD:' + json.dumps(cmd_payload).encode('utf-8') + b'\n')
+            data = s.recv(4096)
+            return data.decode('utf-8')
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
-    def fetch_data(self):
-        # Simulate fetching current device data
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(2)
-            s.connect((self.ip, self.port))
-            s.sendall(b"GET_DATA")
-            data = b""
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-            try:
-                return json.loads(data.decode("utf-8"))
-            except Exception:
-                return {"status": "error", "data": data.decode("utf-8")}
+@app.route("/info", methods=["GET"])
+def device_info():
+    info = {
+        "device_name": DEVICE_NAME,
+        "device_model": DEVICE_MODEL,
+        "manufacturer": DEVICE_MANUFACTURER,
+        "device_type": DEVICE_TYPE,
+        "connection_protocol": DEVICE_PROTOCOL
+    }
+    return jsonify(info)
 
-class ASDHTTPHandler(BaseHTTPRequestHandler):
-    client = SimpleASDClient(DEVICE_IP, DEVICE_PORT)
+@app.route("/data", methods=["GET"])
+def device_data():
+    raw = fetch_device_data()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {"raw": raw}
+    return jsonify(data)
 
-    def _set_headers(self, code=200, content_type="application/json"):
-        self.send_response(code)
-        self.send_header("Content-type", content_type)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
+@app.route("/cmd", methods=["POST"])
+def device_command():
+    payload = request.get_json(force=True, silent=True)
+    if not payload:
+        return jsonify({"error": "Invalid command payload"}), 400
+    result = send_device_command(payload)
+    try:
+        resp = json.loads(result)
+    except Exception:
+        resp = {"raw": result}
+    return jsonify(resp)
 
-    def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-
-    def do_GET(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == "/info":
-            self._set_headers()
-            info = {
-                "device_name": DEVICE_INFO["device_name"],
-                "device_model": DEVICE_INFO["device_model"],
-                "manufacturer": DEVICE_INFO["manufacturer"],
-                "primary_protocol": DEVICE_INFO["primary_protocol"],
-            }
-            self.wfile.write(json.dumps(info).encode("utf-8"))
-        elif parsed_path.path == "/data":
-            self._set_headers()
-            data = self.client.fetch_data()
-            self.wfile.write(json.dumps(data).encode("utf-8"))
-        else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
-
-    def do_POST(self):
-        parsed_path = urlparse(self.path)
-        if parsed_path.path == "/cmd":
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length == 0:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "No payload"}).encode("utf-8"))
-                return
-            post_data = self.rfile.read(content_length)
-            try:
-                command_payload = json.loads(post_data)
-            except Exception:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode("utf-8"))
-                return
-            result = self.client.send_command(command_payload)
-            self._set_headers()
-            self.wfile.write(json.dumps(result).encode("utf-8"))
-        else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
-
-def run_server():
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), ASDHTTPHandler)
-    print(f"ASD HTTP Device Driver running on {SERVER_HOST}:{SERVER_PORT}")
-    server.serve_forever()
+@app.route("/stream", methods=["GET"])
+def device_stream():
+    def stream_generator():
+        try:
+            with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+                s.sendall(b'STREAM\n')
+                while True:
+                    chunk = s.recv(1024)
+                    if not chunk:
+                        break
+                    yield chunk
+        except Exception as e:
+            yield json.dumps({"error": str(e)}).encode('utf-8')
+    return Response(stream_generator(), mimetype="application/octet-stream")
 
 if __name__ == "__main__":
-    run_server()
+    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
