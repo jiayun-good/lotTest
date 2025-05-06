@@ -1,17 +1,9 @@
 import os
-import xml.etree.ElementTree as ET
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
 import threading
-import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import socket
+import xml.etree.ElementTree as ET
 
-# Configuration from environment
-DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
-SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
-
-# Device static info
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -19,72 +11,93 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-# Dummy XML response for /data endpoint
+# Environment Variables for Configuration
+DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))  # dsad protocol port
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+
+# Function to fetch data from device via "dsad" protocol (TCP socket, XML payloads)
 def fetch_device_data():
-    # Simulate fetching XML data from the device using the custom protocol.
-    # In a real driver, this would involve parsing the "dsad" protocol.
-    xml_data = f"""<?xml version="1.0" encoding="UTF-8"?>
-<data>
-    <point name="dsa" value="42"/>
-</data>
-"""
-    return xml_data
+    try:
+        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+            s.sendall(b"<get_data />\n")
+            buf = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"</data>" in buf or b"</root>" in buf:
+                    break
+            return buf.decode("utf-8", errors="ignore")
+    except Exception as e:
+        return f"<error>{str(e)}</error>"
 
-# Dummy function to send command to device
-def send_device_command(xml_command):
-    # In a real driver, this would send the command using the "dsad" protocol.
-    # Here, we simulate an XML response.
-    response = f"""<?xml version="1.0" encoding="UTF-8"?>
-<commandResponse status="success"/>
-"""
-    return response
-
-class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+# Function to send a command to the device
+def send_device_command(xml_cmd):
+    try:
+        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
+            s.sendall(xml_cmd.encode("utf-8") + b"\n")
+            buf = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                if b"</response>" in buf or b"</root>" in buf:
+                    break
+            return buf.decode("utf-8", errors="ignore")
+    except Exception as e:
+        return f"<error>{str(e)}</error>"
 
 class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type="application/xml"):
-        self.send_response(code)
-        self.send_header("Content-type", content_type)
+    def _set_headers(self, status_code=200, content_type="application/xml"):
+        self.send_response(status_code)
+        self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        parsed_path = urllib.parse.urlparse(self.path)
-        if parsed_path.path == '/data':
-            # Proxy: Fetch XML data from device (simulate)
-            xml_data = fetch_device_data()
-            self._set_headers(200, "application/xml")
-            self.wfile.write(xml_data.encode('utf-8'))
-        elif parsed_path.path == '/info':
+        if self.path == "/info":
             self._set_headers(200, "application/json")
-            self.wfile.write(bytes(str(DEVICE_INFO).replace("'", '"'), 'utf-8'))
+            resp = {
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "device_type": DEVICE_INFO["device_type"]
+            }
+            self.wfile.write(str(resp).replace("'", '"').encode("utf-8"))
+        elif self.path == "/data":
+            self._set_headers(200, "application/xml")
+            data = fetch_device_data()
+            self.wfile.write(data.encode("utf-8"))
         else:
-            self._set_headers(404, "application/json")
-            self.wfile.write(b'{"error": "Not Found"}')
+            self._set_headers(404, "text/plain")
+            self.wfile.write(b"Not Found")
 
     def do_POST(self):
-        parsed_path = urllib.parse.urlparse(self.path)
-        if parsed_path.path == '/cmd':
+        if self.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
-            # Expect XML command in the body
+            post_data = self.rfile.read(content_length)
             try:
-                ET.fromstring(body)
-                # Proxy: Send to device (simulate)
-                xml_resp = send_device_command(body.decode('utf-8'))
-                self._set_headers(200, "application/xml")
-                self.wfile.write(xml_resp.encode('utf-8'))
-            except ET.ParseError:
-                self._set_headers(400, "application/json")
-                self.wfile.write(b'{"error": "Invalid XML payload"}')
+                # Expecting XML
+                ET.fromstring(post_data.decode("utf-8"))
+                xml_cmd = post_data.decode("utf-8")
+            except Exception as e:
+                self._set_headers(400, "application/xml")
+                self.wfile.write(f"<error>Invalid XML: {str(e)}</error>".encode("utf-8"))
+                return
+            result = send_device_command(xml_cmd)
+            self._set_headers(200, "application/xml")
+            self.wfile.write(result.encode("utf-8"))
         else:
-            self._set_headers(404, "application/json")
-            self.wfile.write(b'{"error": "Not Found"}')
+            self._set_headers(404, "text/plain")
+            self.wfile.write(b"Not Found")
 
 def run_server():
-    server = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
-    print(f"Starting HTTP server at http://{SERVER_HOST}:{SERVER_PORT}/")
-    server.serve_forever()
+    httpd = HTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
+    print(f"HTTP server started on {SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
     run_server()
