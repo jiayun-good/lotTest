@@ -1,61 +1,45 @@
 import os
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import socket
 
-DEVICE_INFO = {
-    "device_name": os.getenv("DEVICE_NAME", "dsa"),
-    "device_model": os.getenv("DEVICE_MODEL", "dsa"),
-    "manufacturer": os.getenv("MANUFACTURER", ""),
-    "device_type": os.getenv("DEVICE_TYPE", "")
-}
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "dsa")
+DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "dsa")
+MANUFACTURER = os.environ.get("MANUFACTURER", "")
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
-class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status_code=200, content_type="application/json"):
-        self.send_response(status_code)
-        self.send_header('Content-type', content_type)
+class SimpleDeviceDriver(BaseHTTPRequestHandler):
+    def _set_json_headers(self, status=200):
+        self.send_response(status)
+        self.send_header("Content-type", "application/json")
         self.end_headers()
 
     def do_GET(self):
         if self.path == '/info':
-            self._handle_info()
+            self._set_json_headers()
+            info = {
+                "device_name": DEVICE_NAME,
+                "device_model": DEVICE_MODEL,
+                "manufacturer": MANUFACTURER
+            }
+            self.wfile.write(json.dumps(info).encode('utf-8'))
         elif self.path == '/health':
-            self._handle_health()
+            # Health check: always 'ok' for this static driver
+            self._set_json_headers()
+            health = {
+                "status": "ok",
+                "reachable": True
+            }
+            self.wfile.write(json.dumps(health).encode('utf-8'))
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode('utf-8'))
-
-    def _handle_info(self):
-        self._set_headers()
-        self.wfile.write(json.dumps({
-            "device_name": DEVICE_INFO["device_name"],
-            "device_model": DEVICE_INFO["device_model"],
-            "manufacturer": DEVICE_INFO["manufacturer"],
-            "device_type": DEVICE_INFO["device_type"]
-        }).encode('utf-8'))
-
-    def _handle_health(self):
-        self._set_headers()
-        reachable = self._ping_device()
-        self.wfile.write(json.dumps({
-            "status": "online" if reachable else "offline"
-        }).encode('utf-8'))
-
-    def _ping_device(self):
-        device_ip = os.getenv("DEVICE_IP")
-        if not device_ip:
-            return False
-        try:
-            with socket.create_connection((device_ip, int(os.getenv("DEVICE_PING_PORT", 80))), timeout=3):
-                return True
-        except Exception:
-            return False
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b'{"error": "Not found"}')
 
 def run():
-    server_host = os.getenv("SERVER_HOST", "0.0.0.0")
-    server_port = int(os.getenv("SERVER_PORT", 8080))
-    httpd = HTTPServer((server_host, server_port), DeviceHTTPRequestHandler)
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, SimpleDeviceDriver)
     httpd.serve_forever()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run()
