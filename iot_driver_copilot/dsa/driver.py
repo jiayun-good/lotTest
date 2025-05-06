@@ -3,47 +3,41 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 DEVICE_INFO = {
-    "device_name": os.getenv("DEVICE_NAME", "dsa"),
-    "device_model": os.getenv("DEVICE_MODEL", "dsa"),
-    "manufacturer": os.getenv("DEVICE_MANUFACTURER", ""),
-    "device_type": os.getenv("DEVICE_TYPE", "")
+    "device_name": os.environ.get("DEVICE_NAME", "dsa"),
+    "device_model": os.environ.get("DEVICE_MODEL", "dsa"),
+    "manufacturer": os.environ.get("DEVICE_MANUFACTURER", ""),
+    "device_type": os.environ.get("DEVICE_TYPE", "")
 }
 
-class DsaHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type="application/json"):
-        self.send_response(code)
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type="application/json"):
+        self.send_response(status)
         self.send_header("Content-type", content_type)
         self.end_headers()
 
     def do_GET(self):
         if self.path == "/info":
             self._set_headers()
-            self.wfile.write(json.dumps({
-                "device_name": DEVICE_INFO["device_name"],
-                "device_model": DEVICE_INFO["device_model"],
-                "manufacturer": DEVICE_INFO["manufacturer"],
-                "device_type": DEVICE_INFO["device_type"]
-            }).encode("utf-8"))
+            self.wfile.write(json.dumps(DEVICE_INFO).encode("utf-8"))
         elif self.path == "/health":
-            # Here we just return healthy, as there is no device protocol to check
-            self._set_headers()
-            self.wfile.write(json.dumps({
-                "status": "healthy",
+            # Simulate health check
+            health = {
+                "status": "online",
                 "reachable": True
-            }).encode("utf-8"))
+            }
+            self._set_headers()
+            self.wfile.write(json.dumps(health).encode("utf-8"))
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
 
 def run():
-    host = os.getenv("SERVER_HOST", "0.0.0.0")
-    port = int(os.getenv("SERVER_PORT", "8000"))
-    server = HTTPServer((host, port), DsaHandler)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    server.server_close()
+    host = os.environ.get("SERVER_HOST", "0.0.0.0")
+    port = int(os.environ.get("SERVER_PORT", "8080"))
+    server_address = (host, port)
+    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
+    print(f"Starting server on {host}:{port}")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
     run()
