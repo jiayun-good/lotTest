@@ -2,75 +2,66 @@ import os
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-import threading
 
-DEVICE_NAME = os.environ.get("DEVICE_NAME", "asdads")
-DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "ads")
-DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "asddas")
-DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "asd")
-PRIMARY_PROTOCOL = os.environ.get("PRIMARY_PROTOCOL", "asd")
-DATA_POINTS = os.environ.get("DATA_POINTS", "asd")
-COMMANDS = os.environ.get("COMMANDS", "dsa")
-DATA_FORMAT = os.environ.get("DATA_FORMAT", "JSON")
+# Load config from environment variables
+DEVICE_IP = os.getenv('DEVICE_IP', '127.0.0.1')
+SERVER_HOST = os.getenv('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(os.getenv('SERVER_PORT', '8080'))
 
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
-
-# Simulated device state for demonstration purposes
-device_state = {
-    "status": "idle",
-    "metrics": {
-        "asd": 0
-    }
+# Dummy device info and state (simulate interaction with device)
+DEVICE_INFO = {
+    "device_name": "asdads",
+    "device_model": "ads",
+    "manufacturer": "asddas",
+    "device_type": "asd",
+    "primary_protocol": "asd"
+}
+DEVICE_STATE = {
+    "asd": 42,  # Example data point
 }
 
 def fetch_device_data():
-    # Simulate reading from the device's proprietary protocol (asd)
-    # In a real implementation, you'd connect to DEVICE_IP:DEVICE_PORT,
-    # speak the 'asd' protocol, and parse its response.
+    # Simulate retrieval of device data (would be an asd protocol call)
+    # Return as JSON-serializable dict
     return {
-        "asd": device_state["metrics"]["asd"]
+        "asd": DEVICE_STATE.get("asd", None)
     }
 
-def send_device_command(command):
-    # Simulate sending command to the device and updating the device state
-    # In a real implementation, you'd connect to DEVICE_IP:DEVICE_PORT and send the command.
-    # Here, just update the device_state for demonstration.
-    if "set" in command:
-        device_state["metrics"]["asd"] = command.get("set", device_state["metrics"]["asd"])
-        device_state["status"] = "set"
-        return {"result": "success"}
-    device_state["status"] = "unknown command"
-    return {"result": "error", "reason": "Unknown command"}
+def send_device_command(cmd_payload):
+    # Simulate sending command to device and update state
+    # Would normally use the asd protocol to communicate
+    if 'asd' in cmd_payload:
+        DEVICE_STATE['asd'] = cmd_payload['asd']
+        return {"status": "success", "message": "Command executed"}
+    else:
+        return {"status": "error", "message": "Invalid command payload"}
 
-class IoTDeviceHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, content_type="application/json", code=200):
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, code=200, content_type='application/json'):
         self.send_response(code)
         self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
         parsed_path = urlparse(self.path)
-        if parsed_path.path == "/data":
+        if parsed_path.path == "/info":
+            self._set_headers()
+            response = {
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "primary_protocol": DEVICE_INFO["primary_protocol"]
+            }
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+
+        elif parsed_path.path == "/data":
             self._set_headers()
             data = fetch_device_data()
-            self.wfile.write(json.dumps(data).encode())
-        elif parsed_path.path == "/info":
-            self._set_headers()
-            info = {
-                "device_name": DEVICE_NAME,
-                "device_model": DEVICE_MODEL,
-                "manufacturer": DEVICE_MANUFACTURER,
-                "device_type": DEVICE_TYPE,
-                "primary_protocol": PRIMARY_PROTOCOL
-            }
-            self.wfile.write(json.dumps(info).encode())
+            self.wfile.write(json.dumps(data).encode('utf-8'))
+
         else:
-            self._set_headers(code=404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
 
     def do_POST(self):
         parsed_path = urlparse(self.path)
@@ -78,25 +69,22 @@ class IoTDeviceHTTPRequestHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(content_length)
             try:
-                command = json.loads(body)
-            except Exception:
-                self._set_headers(code=400)
-                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
-                return
-            result = send_device_command(command)
-            self._set_headers()
-            self.wfile.write(json.dumps(result).encode())
+                payload = json.loads(body.decode('utf-8'))
+                result = send_device_command(payload)
+                self._set_headers(200 if result["status"] == "success" else 400)
+                self.wfile.write(json.dumps(result).encode('utf-8'))
+            except Exception as e:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode('utf-8'))
         else:
-            self._set_headers(code=404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not Found"}).encode('utf-8'))
 
-    def log_message(self, format, *args):
-        return  # Suppress default logging
-
-def run_http_server():
+def run(server_class=HTTPServer, handler_class=DeviceHTTPRequestHandler):
     server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = HTTPServer(server_address, IoTDeviceHTTPRequestHandler)
+    httpd = server_class(server_address, handler_class)
+    print(f"Starting HTTP server at http://{SERVER_HOST}:{SERVER_PORT}/")
     httpd.serve_forever()
 
-if __name__ == "__main__":
-    run_http_server()
+if __name__ == '__main__':
+    run()
