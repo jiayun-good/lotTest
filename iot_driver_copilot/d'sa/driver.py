@@ -1,18 +1,9 @@
 import os
 import threading
-import http.server
-import socketserver
-import xml.etree.ElementTree as ET
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-from io import BytesIO
+import xml.etree.ElementTree as ET
 
-# Configuration from environment variables
-DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
-SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
-
-# Dummy device data for simulation (replace with actual device communication logic)
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -20,76 +11,79 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-# Simulated data points
-DEVICE_DATA_POINTS = {
-    "dsa": 42
-}
+def get_env_or_default(var, default):
+    return os.environ.get(var, default)
 
-# Simulated command execution
-def perform_device_command(cmd_xml):
-    # Parse XML and simulate a response
-    try:
-        root = ET.fromstring(cmd_xml)
-        action = root.findtext('action') or "none"
-        response = ET.Element('response')
-        status = ET.SubElement(response, 'status')
-        status.text = "success"
-        performed = ET.SubElement(response, 'performed')
-        performed.text = action
-        return ET.tostring(response, encoding='utf-8')
-    except ET.ParseError:
-        response = ET.Element('response')
-        status = ET.SubElement(response, 'status')
-        status.text = "error"
-        message = ET.SubElement(response, 'message')
-        message.text = "Malformed XML"
-        return ET.tostring(response, encoding='utf-8')
+DEVICE_IP = get_env_or_default('DEVICE_IP', '127.0.0.1')
+DEVICE_PORT = int(get_env_or_default('DEVICE_PORT', '9000'))
+SERVER_HOST = get_env_or_default('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(get_env_or_default('SERVER_PORT', '8080'))
 
-# Simulate device data fetch (replace with real device XML fetch)
-def fetch_device_data():
-    root = ET.Element('data')
-    for key, value in DEVICE_DATA_POINTS.items():
-        el = ET.SubElement(root, key)
-        el.text = str(value)
-    return ET.tostring(root, encoding='utf-8')
+# Simulated device XML endpoint
+def fetch_device_xml_data():
+    # In a real driver, connect to device and fetch XML.
+    # Simulate device XML response:
+    data = ET.Element("DeviceData")
+    val = ET.SubElement(data, "DataPoint")
+    val.set("name", "dsa")
+    val.text = "42"
+    return ET.tostring(data, encoding='utf-8', method='xml')
 
-class DeviceHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
-    def _set_headers(self, content_type='application/xml', status=200):
+def send_device_command(xml_payload):
+    # In a real driver, send XML command to device and get response.
+    # Simulate a successful command response:
+    resp = ET.Element("CommandResponse")
+    status = ET.SubElement(resp, "Status")
+    status.text = "Success"
+    return ET.tostring(resp, encoding='utf-8', method='xml')
+
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, content_type="application/json", status=200):
         self.send_response(status)
         self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/data":
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/info':
             self._set_headers()
-            data = fetch_device_data()
-            self.wfile.write(data)
-        elif self.path == "/info":
-            self._set_headers('application/json')
-            import json
-            self.wfile.write(json.dumps(DEVICE_INFO).encode('utf-8'))
+            self.wfile.write(bytes(str({
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "device_type": DEVICE_INFO["device_type"]
+            }), 'utf-8'))
+        elif parsed_path.path == '/data':
+            xml_data = fetch_device_xml_data()
+            self._set_headers("application/xml")
+            self.wfile.write(xml_data)
         else:
-            self._set_headers('text/plain', 404)
-            self.wfile.write(b'Not Found')
+            self._set_headers("application/json", status=404)
+            self.wfile.write(b'{"error": "Not found"}')
 
     def do_POST(self):
-        if self.path == "/cmd":
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            # Accept only XML payload
-            response = perform_device_command(post_data.decode('utf-8'))
-            self._set_headers()
-            self.wfile.write(response)
+            try:
+                # Assume XML payload to send to device
+                xml_payload = ET.fromstring(post_data)
+                resp_xml = send_device_command(ET.tostring(xml_payload))
+                self._set_headers("application/xml")
+                self.wfile.write(resp_xml)
+            except Exception as e:
+                self._set_headers("application/json", status=400)
+                self.wfile.write(bytes('{"error": "Invalid XML payload"}', 'utf-8'))
         else:
-            self._set_headers('text/plain', 404)
-            self.wfile.write(b'Not Found')
-
-    def log_message(self, format, *args):
-        return  # Suppress default logging
+            self._set_headers("application/json", status=404)
+            self.wfile.write(b'{"error": "Not found"}')
 
 def run_server():
-    with socketserver.ThreadingTCPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler) as httpd:
-        httpd.serve_forever()
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
+    print(f"Device driver HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     run_server()
