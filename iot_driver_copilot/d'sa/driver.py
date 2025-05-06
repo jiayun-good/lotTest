@@ -1,18 +1,16 @@
 import os
-import threading
-import http.server
-import socketserver
-from urllib.parse import urlparse, parse_qs
-from http import HTTPStatus
 import xml.etree.ElementTree as ET
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import socketserver
+import threading
 
-# Configuration from environment variables
+# ========== Configuration from Environment Variables ==========
 DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
 DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
 SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-# Device static info
+# ========== Device Info ==========
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -20,85 +18,102 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-# Simulate a connection to device using a custom raw TCP/XML protocol (dsad)
+# ================= Device Communication Layer =================
+
 def get_device_data():
-    import socket
+    """
+    Connects to the device over TCP, requests current data, and returns XML string.
+    """
     try:
-        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
-            s.sendall(b"<GetData></GetData>")
-            chunks = []
+        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect((DEVICE_IP, DEVICE_PORT))
+            # For demonstration, we assume the protocol expects sending "GET_DATA\n"
+            sock.sendall(b"GET_DATA\n")
+            data = b""
             while True:
-                data = s.recv(4096)
-                if not data:
+                chunk = sock.recv(4096)
+                if not chunk:
                     break
-                chunks.append(data)
-            raw_xml = b''.join(chunks).decode('utf-8')
-            # Validate/parse XML before returning
-            ET.fromstring(raw_xml)  # Will raise if invalid
-            return raw_xml
+                data += chunk
+            return data.decode("utf-8")
     except Exception as e:
         return f"<error>{str(e)}</error>"
 
-def send_device_command(command_xml):
-    import socket
+def send_device_command(xml_payload):
+    """
+    Connects to the device over TCP, sends command in XML, and returns XML response.
+    """
     try:
-        with socket.create_connection((DEVICE_IP, DEVICE_PORT), timeout=5) as s:
-            s.sendall(command_xml.encode('utf-8'))
-            chunks = []
+        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
+            sock.settimeout(5)
+            sock.connect((DEVICE_IP, DEVICE_PORT))
+            # Send command as XML
+            sock.sendall(xml_payload.encode('utf-8'))
+            sock.shutdown(socketserver.socket.SHUT_WR)
+            data = b""
             while True:
-                data = s.recv(4096)
-                if not data:
+                chunk = sock.recv(4096)
+                if not chunk:
                     break
-                chunks.append(data)
-            raw_xml = b''.join(chunks).decode('utf-8')
-            ET.fromstring(raw_xml)
-            return raw_xml
+                data += chunk
+            return data.decode("utf-8")
     except Exception as e:
         return f"<error>{str(e)}</error>"
 
-class IoTDeviceHandler(http.server.BaseHTTPRequestHandler):
-    def _set_headers(self, content_type="application/xml", status=HTTPStatus.OK):
-        self.send_response(status)
-        self.send_header("Content-type", content_type)
+# ========== HTTP Server Handler ==========
+
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, content_type="application/xml"):
+        self.send_response(200)
+        self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == '/info':
-            self._set_headers("application/json")
-            self.wfile.write(bytes(str(DEVICE_INFO).replace("'", '"'), 'utf-8'))
-        elif parsed.path == '/data':
-            self._set_headers()
+        if self.path == '/data':
+            self._set_headers("application/xml")
             xml_data = get_device_data()
-            self.wfile.write(xml_data.encode('utf-8'))
+            self.wfile.write(xml_data.encode("utf-8"))
+
+        elif self.path == '/info':
+            self._set_headers("application/json")
+            info = {
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "device_type": DEVICE_INFO["device_type"],
+            }
+            import json
+            self.wfile.write(json.dumps(info).encode("utf-8"))
         else:
-            self._set_headers("text/plain", HTTPStatus.NOT_FOUND)
-            self.wfile.write(b"Not Found")
+            self.send_error(404, "Not found")
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == '/cmd':
+        if self.path == '/cmd':
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
-            try:
-                # Validate input as XML
-                ET.fromstring(post_data.decode('utf-8'))
-                response_xml = send_device_command(post_data.decode('utf-8'))
-                self._set_headers()
-                self.wfile.write(response_xml.encode('utf-8'))
-            except ET.ParseError:
-                self._set_headers("text/plain", HTTPStatus.BAD_REQUEST)
-                self.wfile.write(b"Invalid XML")
+            if self.headers.get('Content-Type', '').startswith('application/xml'):
+                xml_payload = post_data.decode('utf-8')
+            else:
+                # If not XML, wrap the payload in a simple XML element
+                xml_payload = f"<command>{post_data.decode('utf-8')}</command>"
+            response_xml = send_device_command(xml_payload)
+            self._set_headers("application/xml")
+            self.wfile.write(response_xml.encode("utf-8"))
         else:
-            self._set_headers("text/plain", HTTPStatus.NOT_FOUND)
-            self.wfile.write(b"Not Found")
+            self.send_error(404, "Not found")
 
     def log_message(self, format, *args):
-        pass  # Suppress default logging
+        return  # Silent logging
+
+# ========== Threaded HTTP Server ==========
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 def run_server():
-    with socketserver.ThreadingTCPServer((SERVER_HOST, SERVER_PORT), IoTDeviceHandler) as httpd:
-        httpd.serve_forever()
+    httpd = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), DeviceHTTPRequestHandler)
+    print(f"HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd.serve_forever()
 
 if __name__ == '__main__':
     run_server()
