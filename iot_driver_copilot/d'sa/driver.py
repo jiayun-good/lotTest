@@ -1,13 +1,33 @@
 import os
-import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import socket
+import socketserver
+import threading
 import xml.etree.ElementTree as ET
 
-DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
-SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
+# --- Device and Protocol Simulation (since 'dsad' protocol is unknown) ---
+
+def get_device_data_points():
+    # Simulate fetching data from the device using the 'dsad' protocol
+    # Example XML data
+    root = ET.Element("datapoints")
+    ET.SubElement(root, "temperature").text = "25.3"
+    ET.SubElement(root, "humidity").text = "60"
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+def send_device_command(command_xml):
+    # Simulate sending a command to the device and getting a response
+    # Accepts XML and returns status as XML
+    try:
+        root = ET.fromstring(command_xml)
+        response = ET.Element("command_response")
+        ET.SubElement(response, "status").text = "success"
+        ET.SubElement(response, "echo").append(root)
+        return ET.tostring(response, encoding="utf-8", xml_declaration=True)
+    except ET.ParseError:
+        response = ET.Element("command_response")
+        ET.SubElement(response, "status").text = "error"
+        ET.SubElement(response, "error").text = "Malformed XML"
+        return ET.tostring(response, encoding="utf-8", xml_declaration=True)
 
 DEVICE_INFO = {
     "device_name": "d'sa",
@@ -16,135 +36,47 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-class DeviceComm:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
+# --- HTTP Server Implementation ---
 
-    def fetch_data(self):
-        try:
-            with socket.create_connection((self.ip, self.port), timeout=5) as sock:
-                req = "<request><action>get_data</action></request>"
-                sock.sendall(req.encode('utf-8'))
-                data = self._recv_all(sock)
-                return data
-        except Exception as e:
-            return None
-
-    def send_command(self, xml_command):
-        try:
-            with socket.create_connection((self.ip, self.port), timeout=5) as sock:
-                sock.sendall(xml_command.encode('utf-8'))
-                resp = self._recv_all(sock)
-                return resp
-        except Exception as e:
-            return None
-
-    def _recv_all(self, sock):
-        sock.settimeout(2)
-        chunks = []
-        try:
-            while True:
-                data = sock.recv(4096)
-                if not data:
-                    break
-                chunks.append(data)
-        except socket.timeout:
-            pass
-        return b''.join(chunks).decode('utf-8') if chunks else ''
-
-class Handler(BaseHTTPRequestHandler):
-    comm = DeviceComm(DEVICE_IP, DEVICE_PORT)
-
-    def _set_headers(self, code=200, content_type="application/json"):
-        self.send_response(code)
-        self.send_header("Content-type", content_type)
+class IoTDeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type="application/xml"):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        if self.path == '/info':
+        if self.path == '/data':
             self._set_headers()
-            self.wfile.write(bytes(str(DEVICE_INFO), 'utf-8'))
-        elif self.path == '/data':
-            data = self.comm.fetch_data()
-            if not data:
-                self._set_headers(502)
-                self.wfile.write(b'{"error":"Failed to fetch device data"}')
-                return
-            # Try parse XML and convert to JSON-like dict
-            try:
-                root = ET.fromstring(data)
-                resp = self._xml_to_dict(root)
-            except Exception:
-                resp = {"raw": data}
-            self._set_headers()
-            self.wfile.write(bytes(str(resp), 'utf-8'))
+            data_xml = get_device_data_points()
+            self.wfile.write(data_xml)
+        elif self.path == '/info':
+            self._set_headers(content_type="application/json")
+            import json
+            self.wfile.write(json.dumps(DEVICE_INFO).encode('utf-8'))
         else:
-            self._set_headers(404)
-            self.wfile.write(b'{"error":"Endpoint not found"}')
+            self._set_headers(404, "text/plain")
+            self.wfile.write(b'Not Found')
 
     def do_POST(self):
         if self.path == '/cmd':
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length).decode('utf-8')
-            # Expecting body as JSON with 'command'
-            import json
-            try:
-                req = json.loads(body)
-                command = req.get('command')
-                if not command:
-                    raise Exception()
-            except Exception:
-                self._set_headers(400)
-                self.wfile.write(b'{"error":"Invalid request body"}')
-                return
-            # Convert command to XML
-            xml_cmd = f"<request><action>command</action><cmd>{command}</cmd></request>"
-            resp = self.comm.send_command(xml_cmd)
-            if not resp:
-                self._set_headers(502)
-                self.wfile.write(b'{"error":"Device did not respond"}')
-                return
-            try:
-                root = ET.fromstring(resp)
-                resp_body = self._xml_to_dict(root)
-            except Exception:
-                resp_body = {"raw": resp}
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            response_xml = send_device_command(post_data)
             self._set_headers()
-            self.wfile.write(bytes(str(resp_body), 'utf-8'))
+            self.wfile.write(response_xml)
         else:
-            self._set_headers(404)
-            self.wfile.write(b'{"error":"Endpoint not found"}')
+            self._set_headers(404, "text/plain")
+            self.wfile.write(b'Not Found')
 
-    def _xml_to_dict(self, root):
-        d = {root.tag: {} if root.attrib else None}
-        children = list(root)
-        if children:
-            dd = {}
-            for dc in map(self._xml_to_dict, children):
-                for k, v in dc.items():
-                    if k in dd:
-                        if not isinstance(dd[k], list):
-                            dd[k] = [dd[k]]
-                        dd[k].append(v)
-                    else:
-                        dd[k] = v
-            d = {root.tag: dd}
-        if root.attrib:
-            d[root.tag].update(('@' + k, v) for k, v in root.attrib.items())
-        if root.text:
-            text = root.text.strip()
-            if children or root.attrib:
-                if text:
-                    d[root.tag]['#text'] = text
-            else:
-                d[root.tag] = text
-        return d
+    def log_message(self, format, *args):
+        # Suppress default logging
+        return
 
-def run():
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), Handler)
-    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
-    server.serve_forever()
+def run_server():
+    server_host = os.environ.get('SERVER_HOST', '0.0.0.0')
+    server_port = int(os.environ.get('SERVER_PORT', '8080'))
+    with socketserver.ThreadingTCPServer((server_host, server_port), IoTDeviceHTTPRequestHandler) as httpd:
+        httpd.serve_forever()
 
 if __name__ == '__main__':
-    run()
+    run_server()
