@@ -1,135 +1,89 @@
 import os
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+from socketserver import ThreadingMixIn
 import threading
-import socket
-
-DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
-DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '9000'))
-SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
 DEVICE_INFO = {
-    "device_name": "asdads",
-    "device_model": "ads",
-    "manufacturer": "asddas",
-    "device_type": "asd",
-    "primary_protocol": "asd"
+    "device_name": os.environ.get("DEVICE_NAME", "asdads"),
+    "device_model": os.environ.get("DEVICE_MODEL", "ads"),
+    "manufacturer": os.environ.get("DEVICE_MANUFACTURER", "asddas"),
+    "device_type": os.environ.get("DEVICE_TYPE", "asd"),
+    "connection_protocol": os.environ.get("DEVICE_PRIMARY_PROTOCOL", "asd"),
 }
 
-class DeviceConnection:
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
-        self.lock = threading.Lock()
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
 
-    def fetch_data(self):
-        # Simulated raw data fetch from device over TCP socket
-        try:
-            with self.lock:
-                s = socket.create_connection((self.ip, self.port), timeout=3)
-                s.sendall(b'GET_DATA\n')
-                chunks = []
-                while True:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                s.close()
-                data = b''.join(chunks)
-                # Assume device returns JSON bytes
-                return json.loads(data.decode())
-        except Exception as e:
-            return {"error": str(e)}
+# Simulate device data and command interface
+class DeviceSimulator:
+    def __init__(self):
+        self.data_output = {"value": 42, "status": "OK"}
+        self.commands = []
 
-    def send_command(self, cmd_payload):
-        # Simulated command send over TCP socket
-        try:
-            with self.lock:
-                s = socket.create_connection((self.ip, self.port), timeout=3)
-                s.sendall(b'CMD:' + json.dumps(cmd_payload).encode() + b'\n')
-                resp = s.recv(4096)
-                s.close()
-                return json.loads(resp.decode())
-        except Exception as e:
-            return {"error": str(e)}
+    def get_data(self):
+        return self.data_output
 
-    def stream_data(self):
-        # Simulated streaming from device (yields lines or chunks)
-        try:
-            with self.lock:
-                s = socket.create_connection((self.ip, self.port), timeout=3)
-                s.sendall(b'STREAM\n')
-                while True:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    yield chunk
-                s.close()
-        except Exception:
-            return
+    def execute_command(self, cmd):
+        self.commands.append(cmd)
+        # Respond with simulated device response
+        return {"result": "success", "executed": cmd}
 
-device_conn = DeviceConnection(DEVICE_IP, DEVICE_PORT)
+device_sim = DeviceSimulator()
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type='application/json'):
+class Handler(BaseHTTPRequestHandler):
+    def _set_headers(self, code=200, content_type="application/json"):
         self.send_response(code)
         self.send_header('Content-type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'content-type')
         self.end_headers()
 
+    def do_OPTIONS(self):
+        self._set_headers()
+
     def do_GET(self):
-        parsed = urlparse(self.path)
-        if parsed.path == '/info':
+        if self.path == "/info":
             self._set_headers()
-            info = {
-                "device_name": DEVICE_INFO['device_name'],
-                "device_model": DEVICE_INFO['device_model'],
-                "manufacturer": DEVICE_INFO['manufacturer'],
-                "primary_protocol": DEVICE_INFO['primary_protocol']
-            }
-            self.wfile.write(json.dumps(info).encode())
-        elif parsed.path == '/data':
+            self.wfile.write(json.dumps({
+                "device_name": DEVICE_INFO["device_name"],
+                "device_model": DEVICE_INFO["device_model"],
+                "manufacturer": DEVICE_INFO["manufacturer"],
+                "device_type": DEVICE_INFO["device_type"],
+                "connection_protocol": DEVICE_INFO["connection_protocol"]
+            }).encode())
+        elif self.path == "/data":
             self._set_headers()
-            data = device_conn.fetch_data()
-            self.wfile.write(json.dumps(data).encode())
-        elif parsed.path == '/stream':
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Cache-Control', 'no-cache')
-            self.send_header('Connection', 'close')
-            self.end_headers()
-            for chunk in device_conn.stream_data():
-                self.wfile.write(chunk)
-                self.wfile.flush()
+            self.wfile.write(json.dumps(device_sim.get_data()).encode())
         else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'{"error":"Not found"}')
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        if parsed.path == '/cmd':
+        if self.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
+            post_data = self.rfile.read(content_length)
             try:
-                cmd_payload = json.loads(body.decode())
+                cmd = json.loads(post_data.decode())
             except Exception:
                 self._set_headers(400)
-                self.wfile.write(b'{"error":"Invalid JSON"}')
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
                 return
-            result = device_conn.send_command(cmd_payload)
+            result = device_sim.execute_command(cmd)
             self._set_headers()
             self.wfile.write(json.dumps(result).encode())
         else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b'{"error":"Not found"}')
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Handle requests in a separate thread."""
 
 def run_server():
-    httpd = HTTPServer((SERVER_HOST, SERVER_PORT), SimpleHTTPRequestHandler)
-    print(f'Serving HTTP on {SERVER_HOST}:{SERVER_PORT}')
-    httpd.serve_forever()
+    server = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), Handler)
+    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    server.serve_forever()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run_server()
