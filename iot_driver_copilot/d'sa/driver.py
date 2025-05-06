@@ -1,16 +1,10 @@
 import os
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
 import threading
-import xml.etree.ElementTree as ET
 
-# Load configurations from environment variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-
-# Device static info
+# Device Info (static for /info endpoint)
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -18,89 +12,74 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-# Simulate device data
+# Environment Variables
+DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
+SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+
+# Simulated device data fetch
 def fetch_device_data():
-    # Connect to device's raw protocol port (simulate XML data over TCP)
-    try:
-        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
-            sock.settimeout(5)
-            sock.connect((DEVICE_IP, DEVICE_PORT))
-            sock.sendall(b"<getData/>")
-            data = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-        # Parse to ensure it's XML (just as an example)
-        root = ET.fromstring(data.decode('utf-8'))
-        return data.decode('utf-8')
-    except Exception as e:
-        # Return a simple XML error
-        return f"<error>{str(e)}</error>"
+    # In a real driver, connect to the device and fetch the latest XML data
+    # Here, we simulate with sample XML
+    sample_xml = """
+    <DeviceData>
+        <Temperature>22.5</Temperature>
+        <Humidity>45</Humidity>
+        <Status>OK</Status>
+    </DeviceData>
+    """
+    return sample_xml.strip()
 
-def send_device_command(command_xml):
-    # Send command to device (simulate XML command over TCP)
+# Simulated command execution on device
+def send_device_command(xml_payload):
+    # In a real driver, send the XML payload to the device and get response
+    # Here, we simulate a response
     try:
-        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as sock:
-            sock.settimeout(5)
-            sock.connect((DEVICE_IP, DEVICE_PORT))
-            sock.sendall(command_xml.encode('utf-8'))
-            data = b""
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-        # Assume response is XML
-        root = ET.fromstring(data.decode('utf-8'))
-        return data.decode('utf-8')
-    except Exception as e:
-        return f"<error>{str(e)}</error>"
+        ET.fromstring(xml_payload)
+        response = "<Response><Result>Success</Result></Response>"
+    except ET.ParseError:
+        response = "<Response><Result>Invalid XML</Result></Response>"
+    return response
 
-class Handler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type="application/xml"):
-        self.send_response(code)
-        self.send_header('Content-type', content_type)
+class IoTHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, content_type="application/json", status=200):
+        self.send_response(status)
+        self.send_header("Content-type", content_type)
         self.end_headers()
 
     def do_GET(self):
         if self.path == "/info":
-            self._set_headers(200, "application/json")
-            self.wfile.write(bytes(str(DEVICE_INFO).replace("'", '"'), "utf-8"))
+            self._set_headers()
+            self.wfile.write(bytes(str(DEVICE_INFO), "utf-8"))
         elif self.path == "/data":
             xml_data = fetch_device_data()
-            self._set_headers(200, "application/xml")
+            self._set_headers(content_type="application/xml")
             self.wfile.write(xml_data.encode('utf-8'))
         else:
-            self._set_headers(404, "text/plain")
-            self.wfile.write(b"Not found")
+            self._set_headers(status=404)
+            self.wfile.write(b"Not Found")
 
     def do_POST(self):
         if self.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
-            try:
-                # Assume command is XML in body
-                command_xml = post_data.decode('utf-8')
-                # Validate XML
-                ET.fromstring(command_xml)
-                resp = send_device_command(command_xml)
-                self._set_headers(200, "application/xml")
-                self.wfile.write(resp.encode('utf-8'))
-            except Exception as e:
-                self._set_headers(400, "application/xml")
-                self.wfile.write(f"<error>{str(e)}</error>".encode('utf-8'))
+            post_body = self.rfile.read(content_length)
+            xml_payload = post_body.decode("utf-8")
+            response_xml = send_device_command(xml_payload)
+            self._set_headers(content_type="application/xml")
+            self.wfile.write(response_xml.encode("utf-8"))
         else:
-            self._set_headers(404, "text/plain")
-            self.wfile.write(b"Not found")
+            self._set_headers(status=404)
+            self.wfile.write(b"Not Found")
 
     def log_message(self, format, *args):
-        return  # Suppress default logging to stdout
+        return  # Suppress default logging
+
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 def run_server():
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), Handler)
-    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
+    server = ThreadedHTTPServer((SERVER_HOST, SERVER_PORT), IoTHTTPRequestHandler)
     server.serve_forever()
 
 if __name__ == "__main__":
