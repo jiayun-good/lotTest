@@ -2,17 +2,15 @@ import os
 import csv
 import io
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import socketserver
 import threading
 import json
 
-# Configuration via environment variables
+# Read configuration from environment variables
 DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
 SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
+DSA_PORT = int(os.environ.get("DSA_PORT", "9000"))  # Port to connect to dsa device
 
-# Device Info
 DEVICE_INFO = {
     "device_name": "asd",
     "device_model": "sda",
@@ -20,105 +18,71 @@ DEVICE_INFO = {
     "device_type": "asd"
 }
 
-class DSADeviceClient:
-    """
-    Example client for the dsa protocol.
-    This mocks a TCP socket communication for the dsa protocol.
-    """
+# Example real-time data points (simulate CSV data)
+DATA_POINTS = [
+    ["timestamp", "temperature", "humidity", "status"],
+    ["2024-06-12T12:34:56Z", "23.1", "40", "OK"],
+    ["2024-06-12T12:35:56Z", "23.2", "41", "OK"]
+]
 
-    def __init__(self, ip, port):
-        self.ip = ip
-        self.port = port
+# Simulate device connection, real device logic/connection should be implemented here
+def get_device_csv_data():
+    # In a real implementation, connect to the DSA device (e.g., using socket), retrieve and parse CSV data
+    output = io.StringIO()
+    writer = csv.writer(output)
+    for row in DATA_POINTS:
+        writer.writerow(row)
+    return output.getvalue()
 
-    def get_data(self):
-        # Connect to the device and retrieve CSV data
-        try:
-            import socket
-            with socket.create_connection((self.ip, self.port), timeout=5) as s:
-                s.sendall(b"GET_DATA\n")
-                buffer = b""
-                while True:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    buffer += chunk
-                text = buffer.decode("utf-8")
-                return text.strip()
-        except Exception as e:
-            return None
+def send_device_command(command):
+    # In a real implementation, connect to the DSA device and send the command, then get response
+    # For demonstration, simply echo the command
+    return {"result": "success", "command": command}
 
-    def send_command(self, command):
-        # Connect and send a command, expecting a reply
-        try:
-            import socket
-            with socket.create_connection((self.ip, self.port), timeout=5) as s:
-                s.sendall(command.encode("utf-8") + b"\n")
-                buffer = b""
-                while True:
-                    chunk = s.recv(4096)
-                    if not chunk:
-                        break
-                    buffer += chunk
-                text = buffer.decode("utf-8")
-                return text.strip()
-        except Exception as e:
-            return None
-
-device_client = DSADeviceClient(DEVICE_IP, DEVICE_PORT)
-
-class Handler(BaseHTTPRequestHandler):
-    def _set_headers(self, code=200, content_type="application/json"):
-        self.send_response(code)
-        self.send_header("Content-type", content_type)
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, content_type="application/json", status=200, extra_headers=None):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
 
     def do_GET(self):
         if self.path == "/info":
             self._set_headers()
-            self.wfile.write(json.dumps(DEVICE_INFO).encode("utf-8"))
+            self.wfile.write(json.dumps(DEVICE_INFO).encode())
         elif self.path == "/data":
-            csv_data = device_client.get_data()
-            if csv_data is None:
-                self._set_headers(502, "application/json")
-                self.wfile.write(json.dumps({"error": "Failed to retrieve data from device"}).encode("utf-8"))
-                return
-            self._set_headers(200, "text/csv")
-            # If the data is already CSV, stream as is
-            self.wfile.write(csv_data.encode("utf-8"))
+            csv_data = get_device_csv_data()
+            self._set_headers(content_type="text/csv")
+            self.wfile.write(csv_data.encode())
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
+            self._set_headers(status=404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
 
     def do_POST(self):
         if self.path == "/cmd":
-            content_length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(content_length)
+            content_length = int(self.headers.get("Content-Length", 0))
+            post_data = self.rfile.read(content_length)
             try:
-                payload = json.loads(body)
+                payload = json.loads(post_data.decode())
                 command = payload.get("command")
                 if not command:
-                    raise ValueError("Missing 'command' in payload")
-                response = device_client.send_command(command)
-                if response is None:
-                    self._set_headers(502)
-                    self.wfile.write(json.dumps({"error": "Failed to send command to device"}).encode("utf-8"))
-                else:
-                    self._set_headers(200)
-                    self.wfile.write(json.dumps({"result": response}).encode("utf-8"))
+                    raise ValueError("Missing command")
+                result = send_device_command(command)
+                self._set_headers()
+                self.wfile.write(json.dumps(result).encode())
             except Exception as e:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+                self._set_headers(status=400)
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
         else:
-            self._set_headers(404)
-            self.wfile.write(json.dumps({"error": "Not found"}).encode("utf-8"))
-
-    def log_message(self, format, *args):
-        return  # Silence the default logging
+            self._set_headers(status=404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
 
 def run_server():
     server_address = (SERVER_HOST, SERVER_PORT)
-    httpd = HTTPServer(server_address, Handler)
-    print(f"DSA HTTP Driver running at http://{SERVER_HOST}:{SERVER_PORT}/")
+    httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
+    print(f"Starting HTTP server on {SERVER_HOST}:{SERVER_PORT}")
     httpd.serve_forever()
 
 if __name__ == "__main__":
