@@ -1,17 +1,11 @@
 import os
-from flask import Flask, Response, jsonify, request, stream_with_context
 import csv
 import io
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 import threading
-import time
 
-# Get configuration from environment variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))  # Port for dsa protocol
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-
-# Device static information
+# Device Info (static for this example, but could come from device queries)
 DEVICE_INFO = {
     "device_name": "asd",
     "device_model": "sda",
@@ -19,94 +13,84 @@ DEVICE_INFO = {
     "device_type": "asd"
 }
 
-# Simulated device data points and commands (for demonstration)
-DATA_POINTS = [
-    {"timestamp": int(time.time()), "value": 100, "status": "OK"},
-    {"timestamp": int(time.time()) + 1, "value": 105, "status": "OK"},
-    {"timestamp": int(time.time()) + 2, "value": 99, "status": "WARN"}
+# Dummy device data (for CSV endpoint)
+DUMMY_DATA = [
+    {"timestamp": "2024-06-10T01:00:00Z", "param1": "123", "param2": "456"},
+    {"timestamp": "2024-06-10T01:01:00Z", "param1": "124", "param2": "457"},
 ]
 
-COMMANDS = ["START", "STOP", "DIAGNOSTIC"]
+# Supported commands
+SUPPORTED_COMMANDS = ["start", "stop", "diagnostic"]
 
-# Simulated device storage (thread-safe)
-device_lock = threading.Lock()
-device_state = {"running": False}
+# Configuration from environment variables
+SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
 
-# Simulated raw DSA protocol connection and CSV stream
-def connect_to_dsa_and_stream_csv():
-    """
-    Simulate a connection to a DSA protocol device and yield CSV rows as a stream.
-    Replace this with actual protocol implementation as needed.
-    """
-    # Simulate real-time data
-    while True:
-        with device_lock:
-            if not device_state["running"]:
-                break
-            data_point = {
-                "timestamp": int(time.time()),
-                "value": 100 + int(time.time()) % 10,
-                "status": "OK" if int(time.time()) % 5 != 0 else "WARN"
-            }
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=["timestamp", "value", "status"])
-        writer.writerow(data_point)
-        yield output.getvalue()
-        time.sleep(1)
+# Example: If you have device IP or port, you can use them here
+DEVICE_IP = os.getenv("DEVICE_IP", "127.0.0.1")
+DEVICE_PORT = int(os.getenv("DEVICE_PORT", "12345"))  # Not used in dummy, but for real device connection
 
-app = Flask(__name__)
+class DeviceHTTPHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type="application/json"):
+        self.send_response(status)
+        self.send_header('Content-type', content_type)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
 
-@app.route("/info", methods=["GET"])
-def get_info():
-    return jsonify(DEVICE_INFO)
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
 
-@app.route("/data", methods=["GET"])
-def get_data():
-    stream = request.args.get("stream", "false").lower() == "true"
-    if stream:
-        def generate():
-            # Stream real-time CSV data from device
-            with device_lock:
-                device_state["running"] = True
-            try:
-                # Write CSV header
-                header_output = io.StringIO()
-                writer = csv.DictWriter(header_output, fieldnames=["timestamp", "value", "status"])
-                writer.writeheader()
-                yield header_output.getvalue()
-                for csv_row in connect_to_dsa_and_stream_csv():
-                    yield csv_row
-            finally:
-                with device_lock:
-                    device_state["running"] = False
-        return Response(stream_with_context(generate()), mimetype="text/csv")
-    else:
-        # Return latest snapshot as CSV
-        output = io.StringIO()
-        writer = csv.DictWriter(output, fieldnames=["timestamp", "value", "status"])
-        writer.writeheader()
-        for dp in DATA_POINTS:
-            writer.writerow(dp)
-        return Response(output.getvalue(), mimetype="text/csv")
-
-@app.route("/cmd", methods=["POST"])
-def post_command():
-    cmd = request.json.get("command", "").upper()
-    if cmd not in COMMANDS:
-        return jsonify({"status": "error", "message": "Unknown command"}), 400
-    with device_lock:
-        if cmd == "START":
-            device_state["running"] = True
-            result = {"status": "ok", "message": "Device started"}
-        elif cmd == "STOP":
-            device_state["running"] = False
-            result = {"status": "ok", "message": "Device stopped"}
-        elif cmd == "DIAGNOSTIC":
-            # Simulate diagnostic info
-            result = {"status": "ok", "message": "Diagnostic complete", "diagnostic": {"uptime": int(time.time()) % 1000, "errors": 0}}
+    def do_GET(self):
+        if self.path == "/info":
+            self._set_headers()
+            self.wfile.write(json.dumps(DEVICE_INFO).encode())
+        elif self.path == "/data":
+            self._set_headers(content_type="text/csv")
+            output = io.StringIO()
+            writer = csv.DictWriter(output, fieldnames=DUMMY_DATA[0].keys())
+            writer.writeheader()
+            for row in DUMMY_DATA:
+                writer.writerow(row)
+            self.wfile.write(output.getvalue().encode())
         else:
-            result = {"status": "ok", "message": f"Executed {cmd}"}
-    return jsonify(result)
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+
+    def do_POST(self):
+        if self.path == "/cmd":
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            try:
+                data = json.loads(post_data)
+                command = data.get("command")
+                if command in SUPPORTED_COMMANDS:
+                    # Here you would send the command to the actual device
+                    response = {
+                        "status": "success",
+                        "command": command,
+                        "message": f"Command '{command}' sent to device."
+                    }
+                    self._set_headers()
+                    self.wfile.write(json.dumps(response).encode())
+                else:
+                    self._set_headers(400)
+                    self.wfile.write(json.dumps({"error": "Unsupported command"}).encode())
+            except Exception as e:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({"error": "Not found"}).encode())
+
+def run_server():
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, DeviceHTTPHandler)
+    print(f"HTTP server running at http://{SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
 
 if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT, threaded=True)
+    run_server()
