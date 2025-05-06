@@ -1,16 +1,10 @@
 import os
-import xml.etree.ElementTree as ET
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socketserver
-import threading
+import urllib.parse
+import xml.etree.ElementTree as ET
 
-# Configuration from environment variables
-DEVICE_IP = os.environ.get("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.environ.get("DEVICE_PORT", "9000"))
-SERVER_HOST = os.environ.get("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "8080"))
-
-# Device static info
 DEVICE_INFO = {
     "device_name": "d'sa",
     "device_model": "dsad'sa",
@@ -18,108 +12,105 @@ DEVICE_INFO = {
     "device_type": "dsa"
 }
 
-def fetch_device_data():
-    """
-    Connects to the device via TCP socket, receives XML data, and returns it as string.
-    """
-    try:
-        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as s:
-            s.settimeout(5.0)
-            s.connect((DEVICE_IP, DEVICE_PORT))
-            # Protocol-specific handshake or request may be required.
-            # For this example, assume we send nothing and receive data directly.
-            data = b""
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                if b"</data>" in data or b"</status>" in data:
-                    break
-            return data.decode(errors="ignore")
-    except Exception as e:
-        return None
+def get_env(key, default=None, required=False):
+    value = os.environ.get(key, default)
+    if required and value is None:
+        raise RuntimeError(f"Missing required environment variable: {key}")
+    return value
 
-def send_device_command(cmd_xml):
-    """
-    Sends an XML command to the device and returns its response as string.
-    """
-    try:
-        with socketserver.socket.socket(socketserver.socket.AF_INET, socketserver.socket.SOCK_STREAM) as s:
-            s.settimeout(5.0)
-            s.connect((DEVICE_IP, DEVICE_PORT))
-            s.sendall(cmd_xml.encode())
-            data = b""
-            while True:
-                chunk = s.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                if b"</response>" in data:
-                    break
-            return data.decode(errors="ignore")
-    except Exception as e:
-        return None
+DEVICE_IP = get_env("DEVICE_IP", required=True)
+DEVICE_PORT = int(get_env("DEVICE_PORT", "8001"))
+SERVER_HOST = get_env("SERVER_HOST", "0.0.0.0")
+SERVER_PORT = int(get_env("SERVER_PORT", "8080"))
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def _set_headers(self, status=200, content_type="application/json"):
-        self.send_response(status)
-        self.send_header("Content-type", content_type)
+class DeviceConnection:
+    def __init__(self, ip, port):
+        self.ip = ip
+        self.port = int(port)
+        self.lock = threading.Lock()
+
+    def fetch_data_xml(self):
+        import http.client
+        conn = http.client.HTTPConnection(self.ip, self.port, timeout=5)
+        try:
+            conn.request("GET", "/data")
+            resp = conn.getresponse()
+            if resp.status == 200:
+                data = resp.read()
+                return data
+            else:
+                return None
+        finally:
+            conn.close()
+
+    def send_command_xml(self, xml_payload):
+        import http.client
+        conn = http.client.HTTPConnection(self.ip, self.port, timeout=5)
+        try:
+            conn.request("POST", "/cmd", body=xml_payload, headers={"Content-Type": "application/xml"})
+            resp = conn.getresponse()
+            data = resp.read()
+            return resp.status, data
+        finally:
+            conn.close()
+
+class IoTHTTPRequestHandler(BaseHTTPRequestHandler):
+    devconn = DeviceConnection(DEVICE_IP, DEVICE_PORT)
+
+    def _set_headers(self, code=200, content_type="application/json"):
+        self.send_response(code)
+        self.send_header('Content-type', content_type)
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/info":
-            self._set_headers()
-            self.wfile.write(str(DEVICE_INFO).replace("'", '"').encode())
-        elif self.path == "/data":
-            xml_data = fetch_device_data()
-            if xml_data is None:
-                self._set_headers(500)
-                self.wfile.write(b'{"error": "Failed to retrieve data from device"}')
-                return
-            # Convert XML to JSON-like dict for browser consumption
-            try:
-                root = ET.fromstring(xml_data)
-                data_dict = {root.tag: {child.tag: child.text for child in root}}
-                import json
-                self._set_headers()
-                self.wfile.write(json.dumps(data_dict).encode())
-            except Exception:
+        parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path == "/info":
+            self._set_headers(200, "application/json")
+            self.wfile.write(bytes(str(DEVICE_INFO).replace("'", '"'), "utf-8"))
+        elif parsed_path.path == "/data":
+            # Fetch data from device and stream as XML over HTTP
+            xml_data = self.devconn.fetch_data_xml()
+            if xml_data:
                 self._set_headers(200, "application/xml")
-                self.wfile.write(xml_data.encode())
+                self.wfile.write(xml_data)
+            else:
+                self._set_headers(502, "application/json")
+                self.wfile.write(b'{"error": "Failed to fetch data from device"}')
         else:
-            self._set_headers(404)
+            self._set_headers(404, "application/json")
             self.wfile.write(b'{"error": "Not found"}')
 
     def do_POST(self):
-        if self.path == "/cmd":
+        parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path == "/cmd":
             content_length = int(self.headers.get('Content-Length', 0))
-            post_data = self.rfile.read(content_length)
+            post_body = self.rfile.read(content_length)
+            # Validate XML payload
             try:
-                # Expecting XML payload
-                cmd_xml = post_data.decode()
-                response = send_device_command(cmd_xml)
-                if response is None:
-                    self._set_headers(500)
-                    self.wfile.write(b'{"error": "Failed to send command to device"}')
-                    return
-                self._set_headers(200, "application/xml")
-                self.wfile.write(response.encode())
-            except Exception:
-                self._set_headers(400)
-                self.wfile.write(b'{"error": "Invalid command payload"}')
+                ET.fromstring(post_body)
+            except ET.ParseError:
+                self._set_headers(400, "application/json")
+                self.wfile.write(b'{"error": "Invalid XML payload"}')
+                return
+            status, resp_data = self.devconn.send_command_xml(post_body)
+            self._set_headers(status, "application/xml")
+            self.wfile.write(resp_data)
         else:
-            self._set_headers(404)
+            self._set_headers(404, "application/json")
             self.wfile.write(b'{"error": "Not found"}')
 
     def log_message(self, format, *args):
-        # Optional: silence default logging or output to a file
-        pass
+        # Suppress default logging
+        return
 
-def run_server():
-    server = HTTPServer((SERVER_HOST, SERVER_PORT), SimpleHTTPRequestHandler)
-    print(f"HTTP server running on {SERVER_HOST}:{SERVER_PORT}")
-    server.serve_forever()
+class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
-if __name__ == "__main__":
-    run_server()
+def run():
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = ThreadedHTTPServer(server_address, IoTHTTPRequestHandler)
+    print(f"Serving on {SERVER_HOST}:{SERVER_PORT}")
+    httpd.serve_forever()
+
+if __name__ == '__main__':
+    run()
