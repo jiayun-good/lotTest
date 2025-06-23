@@ -1,74 +1,89 @@
 import os
-from flask import Flask, request, jsonify, Response, abort
 import json
-from threading import Lock
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
 
-# Configuration from environment variables
-DEVICE_IP = os.getenv("DEVICE_IP", "127.0.0.1")
-DEVICE_PORT = int(os.getenv("DEVICE_PORT", "8001"))
-SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
-SERVER_PORT = int(os.getenv("SERVER_PORT", "8080"))
+# Load configuration from environment variables
+SERVER_HOST = os.environ.get('SERVER_HOST', '0.0.0.0')
+SERVER_PORT = int(os.environ.get('SERVER_PORT', '8080'))
 
-app = Flask(__name__)
+# Device configuration via environment
+DEVICE_IP = os.environ.get('DEVICE_IP', '127.0.0.1')
+DEVICE_PORT = int(os.environ.get('DEVICE_PORT', '5000'))
+DEVICE_NAME = os.environ.get('DEVICE_NAME', 'test1')
 
-# In-memory storage for device data and state simulation
-device_state_lock = Lock()
-device_data = {
-    "temperature": 23.5,
-    "humidity": 55,
-    "status": "normal"
-}
-device_config = {}
+# For demonstration purposes, fake data/command handlers
+def device_send_command(cmd_json):
+    # Simulate sending a command to the device and getting a result
+    # In a real driver, you would connect to the device (e.g., via TCP/HTTP/Serial)
+    # and send the actual command, then read the response.
+    # Here we just echo back the request as an 'ack'.
+    return {
+        "status": "success",
+        "device": DEVICE_NAME,
+        "command": cmd_json
+    }
 
-@app.route("/cmd", methods=["POST"])
-def send_command():
-    """
-    Send a command to the device for control or configuration.
-    The command payload should be provided in JSON format.
-    """
-    if not request.is_json:
-        return jsonify({"error": "Request payload must be JSON"}), 400
+def device_get_data(query_params):
+    # Simulate fetching data from the device
+    # In a real driver, connect and request current data.
+    # Here, we just return a stub.
+    return {
+        "device": DEVICE_NAME,
+        "data": {
+            "temperature": 24.5,
+            "humidity": 56,
+            "status": "OK"
+        },
+        "query": query_params
+    }
 
-    cmd_payload = request.get_json()
-    if not isinstance(cmd_payload, dict) or "command" not in cmd_payload:
-        return jsonify({"error": "Missing 'command' in payload"}), 400
+class DeviceHTTPRequestHandler(BaseHTTPRequestHandler):
+    def _set_headers(self, status=200, content_type='application/json'):
+        self.send_response(status)
+        self.send_header('Content-Type', content_type)
+        self.end_headers()
 
-    command = cmd_payload["command"]
-    params = cmd_payload.get("params", {})
+    def do_POST(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/cmd':
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            try:
+                cmd_json = json.loads(body.decode('utf-8'))
+            except Exception:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({'error': 'Invalid JSON'}).encode('utf-8'))
+                return
 
-    # Simulate command execution and update device config/state
-    with device_state_lock:
-        if command == "set_config":
-            if not isinstance(params, dict):
-                return jsonify({"error": "'params' must be a JSON object"}), 400
-            device_config.update(params)
-            return jsonify({"result": "Configuration updated", "device_config": device_config})
-        elif command == "reset":
-            device_config.clear()
-            device_data.update({
-                "temperature": 23.5,
-                "humidity": 55,
-                "status": "normal"
-            })
-            return jsonify({"result": "Device reset", "device_data": device_data})
+            # Send command to device
+            result = device_send_command(cmd_json)
+            self._set_headers(200)
+            self.wfile.write(json.dumps(result).encode('utf-8'))
         else:
-            return jsonify({"error": f"Unknown command '{command}'"}), 400
+            self._set_headers(404)
+            self.wfile.write(json.dumps({'error': 'Not Found'}).encode('utf-8'))
 
-@app.route("/data", methods=["GET"])
-def get_data():
-    """
-    Retrieve current data points from the device.
-    Supports query parameters for filtering and pagination if multiple data entries exist.
-    """
-    with device_state_lock:
-        # Support filtering by query parameters
-        filtered_data = device_data.copy()
-        for key in request.args:
-            if key in filtered_data:
-                filtered_data = {key: filtered_data[key]}
-            else:
-                return jsonify({"error": f"Data point '{key}' not found"}), 404
-        return Response(json.dumps(filtered_data), mimetype='application/json')
+    def do_GET(self):
+        parsed_path = urlparse(self.path)
+        if parsed_path.path == '/data':
+            query = parse_qs(parsed_path.query)
+            # Fetch data from device with query as parameter
+            result = device_get_data(query)
+            self._set_headers(200)
+            self.wfile.write(json.dumps(result).encode('utf-8'))
+        else:
+            self._set_headers(404)
+            self.wfile.write(json.dumps({'error': 'Not Found'}).encode('utf-8'))
 
-if __name__ == "__main__":
-    app.run(host=SERVER_HOST, port=SERVER_PORT)
+    def log_message(self, format, *args):
+        # Disable default logging to stderr
+        pass
+
+def run_server():
+    server_address = (SERVER_HOST, SERVER_PORT)
+    httpd = HTTPServer(server_address, DeviceHTTPRequestHandler)
+    httpd.serve_forever()
+
+if __name__ == '__main__':
+    run_server()
